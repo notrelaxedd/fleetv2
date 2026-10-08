@@ -17,6 +17,7 @@ from coordinator.broker import BrokerStatus, make_broker
 from coordinator.bundle import build_bundle
 from coordinator.config import Config
 from coordinator.data import make_bar_source
+from coordinator.futures_data import make_futures_source
 from coordinator.errors import QueueError
 from coordinator.limits import load_limits
 from coordinator import models as starter_models
@@ -145,6 +146,7 @@ def create_app(config: Config, broker_status: BrokerStatus | None = None) -> Fas
         broker_status = BrokerStatus(make_broker(config, _live_confirmed(config)))
     app.state.broker_status = broker_status
     app.state.bar_source = make_bar_source(config)
+    app.state.futures_source = make_futures_source(config)
     app.state.bundle = build_bundle()
     log.info("worker bundle code_version=%s", app.state.bundle.code_version)
 

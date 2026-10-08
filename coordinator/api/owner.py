@@ -51,6 +51,8 @@ def fleet(request: Request, conn: psycopg.Connection = DB) -> dict[str, Any]:
 def create_job(body: JobBody, request: Request, conn: psycopg.Connection = DB) -> dict[str, Any]:
     """Assign a job. target: "auto", "all_idle" or a worker id. The confirmation line
     the dashboard shows comes back in `message`."""
+    if body.kind == "futures_prices":  # a Data refresh of the futures market only (Models screen, Futures)
+        body.kind, body.params = "data_refresh", {"markets": ["futures"]}
     if body.kind != "sleep" and body.kind not in fleet_view.AVAILABLE_KINDS:
         raise BadRequest(f"{fleet_view.JOB_LABELS.get(body.kind, body.kind)} jobs are not available in this build yet")
     if body.kind in fleet_view.NEEDS_MODEL and not body.model_id:

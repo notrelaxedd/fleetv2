@@ -44,6 +44,49 @@ says "Add your Alpaca paper keys to .env on box1".
 Stock prices come from `ALPACA_DATA_FEED=iex`, Alpaca's free feed. `sip` is Alpaca's paid
 feed: set it only with the owner's OK.
 
+## Futures prices (for Topstep research)
+
+The Futures market is research only: it backtests and searches for day-trading models
+on the CME micro futures MES (micro S&P 500) and MNQ (micro Nasdaq-100), and never
+places an order. It uses 1-minute bars of the regular session only, 8:30 to 15:00
+Chicago time (to 12:00 on half days), from May 2019.
+
+Where the prices come from:
+
+- **Databento** (paid, pay-as-you-go), when `.env` on box1 has a key:
+
+  ```
+  DATABENTO_API_KEY=...
+  ```
+
+  Then `docker compose up -d coordinator`. Only the coordinator reads the key, like the
+  Alpaca keys. Before every download the coordinator asks Databento what bringing MES and
+  MNQ up to date will cost, and refuses when that is more than `max_download_usd` in
+  `config/topstep.toml` (10 dollars to start; raise it yourself if a first full download
+  costs more). A refused download says the price and changes nothing.
+- **Proxy** (free), when there is no Databento key: SPY and QQQ 1-minute bars from Alpaca
+  (your paper keys) standing in for MES and MNQ, scaled to about index points. Good for
+  building and testing; the dashboard labels it "proxy" everywhere, and it can never
+  earn a "ready for a Combine" verdict.
+- **Synthetic** in demo mode (`FLEET_FAKE_BROKER=1`): made-up prices, labelled so.
+
+To load them, start a **Futures prices** job on box1:
+
+```bash
+docker compose exec coordinator python -m coordinator.cli futures-prices
+```
+
+It downloads a month of one symbol at a
+time (about 90 steps for the full history, so give it a while the first time), and only
+adds what is new after that. If you add a Databento key later, the next Futures prices
+job replaces the proxy bars with Databento's, never mixing the two.
+
+The futures history is then split by date into three periods, fixed once and never
+moved: **training** (the first 60% of the days, the only part model search sees),
+**held-out** (the next 25%, for ranking) and the **lockbox** (the last 15%, opened once
+per model by Final check). Prices after the lockbox are not used yet. The split happens
+the first time something needs it, so load the full history first.
+
 ## Add a worker
 
 On box1, make a one-time token (valid for one hour):

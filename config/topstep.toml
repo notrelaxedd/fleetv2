@@ -1,0 +1,8 @@
+# fleet-v2 futures settings: prices for Topstep research. Edit on box1, then
+# `docker compose restart coordinator`.
+
+[data]
+# Databento is pay-as-you-go. Before every futures download the coordinator asks
+# Databento what bringing MES and MNQ up to date will cost, and refuses when that is
+# above this many US dollars. Your own spending cap, not a Topstep rule.
+max_download_usd = 10.0

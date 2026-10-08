@@ -81,8 +81,8 @@ def job_params(conn: psycopg.Connection, kind: str, model_id: str | None, params
     """Fill in what a worker needs, so it never has to ask the coordinator for the model."""
     if kind == "data_refresh":
         markets = params.get("markets") or ["stocks", "crypto"]
-        if not isinstance(markets, list) or not set(markets) <= {"stocks", "crypto"}:
-            raise BadRequest("markets must be a list of stocks and/or crypto")
+        if not isinstance(markets, list) or not set(markets) <= {"stocks", "crypto", "futures"}:
+            raise BadRequest("markets must be a list of stocks, crypto and/or futures")
         return {"markets": markets}
     if kind == "backtest":
         if not model_id:

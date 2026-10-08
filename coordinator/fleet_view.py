@@ -25,6 +25,7 @@ JOB_LABELS = {
     "backtest": "Backtest",
     "paper_trade": "Paper trade",
     "model_search": "Model search",
+    "final_check": "Final check",
 }
 JOB_CHOICES = (
     ("backtest", "Backtest", "Test one model on past prices and save its results."),
