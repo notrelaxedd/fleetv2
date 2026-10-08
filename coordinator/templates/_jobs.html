@@ -1,0 +1,25 @@
+{% if previous_jobs %}
+<div class="table-wrap">
+<table class="jobs" data-table="previous-jobs">
+  <thead><tr><th>Job</th><th>Model</th><th>Worker</th><th>Finished</th><th>Took</th><th>Result</th><th>Status</th></tr></thead>
+  <tbody>
+  {% for j in previous_jobs %}
+    <tr data-job="{{ j.id }}" data-state="{{ j.state }}">
+      <td>{{ j.job }}</td>
+      <td class="num">{{ j.model }}</td>
+      <td class="num">{{ j.worker }}</td>
+      <td>{{ j.finished }}</td>
+      <td class="num">{{ j.took }}</td>
+      <td data-result>{{ j.result }}</td>
+      <td class="status-cell">
+        <span class="badge" data-status="{{ j.state }}">{{ j.status }}</span>
+        {% if j.can_run_again %}<button type="button" class="btn small" data-action="run-again" data-job-id="{{ j.id }}">Run again</button>{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+<p class="empty" data-empty="jobs">No finished jobs yet.</p>
+{% endif %}

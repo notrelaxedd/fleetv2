@@ -1,0 +1,4 @@
+<span class="pill" data-pill="mode" data-state="{{ header.mode.state }}"><i class="dot" aria-hidden="true"></i>{{ header.mode.text }}</span>
+<span class="pill" data-pill="stocks" data-state="{{ header.stocks.state }}"><i class="dot" aria-hidden="true"></i>{{ header.stocks.text }}</span>
+<span class="pill" data-pill="crypto" data-state="{{ header.crypto.state }}"><i class="dot" aria-hidden="true"></i>{{ header.crypto.text }}</span>
+<button type="button" class="btn pause" data-action="{{ 'resume' if header.paused else 'pause' }}" data-paused="{{ 'true' if header.paused else 'false' }}">{{ header.pause_button }}</button>

@@ -90,3 +90,16 @@ def test_pause_and_resume_switch(client, conn):
     assert client.get("/api/fleet").json()["header"]["banner"] is None
     actions = [r["action"] for r in conn.execute("SELECT action FROM audit_log ORDER BY id")]
     assert "trading_paused" in actions and "trading_resumed" in actions
+
+
+def test_coordinator_restart_keeps_running_jobs(client, conn):
+    from coordinator import recovery
+
+    w = enroll(client, conn, "w10")
+    heartbeat(client, w)
+    client.post("/api/jobs", json={"kind": "sleep", "params": {"seconds": 60}, "target": w["worker_id"]})
+    job = heartbeat(client, w, want_job=True)["claimed"][0]
+    conn.execute("UPDATE jobs SET lease_expires_at = now() - interval '1 second'")
+    assert recovery.startup_grace(conn, 30) == 1
+    queue.reap(conn)
+    assert conn.execute("SELECT status FROM jobs WHERE id = %s", (job["id"],)).fetchone()["status"] == "leased"

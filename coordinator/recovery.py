@@ -105,3 +105,20 @@ def reap(conn: psycopg.Connection) -> list[dict[str, Any]]:
     for row in rows:
         add_job_event(conn, row["id"], "lease_expired", row["old_worker"], {"status": row["status"]})
     return rows
+
+
+def startup_grace(conn: psycopg.Connection, lease: int) -> int:
+    """At coordinator start: give every running job one fresh lease, so a coordinator
+    restart (an update, a reboot of box1) does not fail jobs whose workers are fine.
+    Workers re-register within seconds and re-adopt their jobs; a worker that really
+    died still has its job failed once this lease runs out."""
+    rows = conn.execute(
+        """
+        UPDATE jobs SET lease_expires_at = GREATEST(lease_expires_at, now() + make_interval(secs => %s)),
+               updated_at = now()
+         WHERE status IN ('leased', 'cancel_requested')
+         RETURNING id
+        """,
+        (lease,),
+    ).fetchall()
+    return len(rows)

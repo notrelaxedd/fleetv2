@@ -1,0 +1,9 @@
+<div class="tiles">
+{% for t in tiles %}
+  <article class="tile" data-tile="{{ t.key }}" data-tone="{{ t.tone }}">
+    <h2>{{ t.label }}</h2>
+    <p class="value num">{{ t.value }}</p>
+    <p class="note">{{ t.note }}</p>
+  </article>
+{% endfor %}
+</div>

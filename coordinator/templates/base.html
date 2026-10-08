@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>{% block title %}Fleet{% endblock %} · fleet-v2</title>
+<link rel="preload" href="/static/fonts/manrope-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/jetbrains-mono-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body data-page="{{ current }}">
+<header class="top">
+  <div class="top-row">
+    <div class="brand">
+      <a class="name" href="/fleet">fleet-v2</a>
+      {% if header.demo %}<span class="demo" data-demo>demo data</span>{% endif %}
+    </div>
+    <nav class="nav" aria-label="Screens">
+      <a href="/fleet" data-nav="fleet"{% if current == "fleet" %} class="current" aria-current="page"{% endif %}>Fleet</a>
+      <a href="/models" data-nav="models"{% if current == "models" %} class="current" aria-current="page"{% endif %}>Models</a>
+    </nav>
+    <div class="status" data-region="status">{% include "_status.html" %}</div>
+  </div>
+  <div data-region="banner">{% include "_banner.html" %}</div>
+</header>
+<p class="stale" id="stale" role="status" hidden>Cannot reach the coordinator. Showing the last data it sent.</p>
+<main class="page">
+{% block content %}{% endblock %}
+</main>
+<p class="toast" id="toast" role="status" aria-live="polite" hidden></p>
+</body>
+</html>

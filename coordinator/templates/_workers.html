@@ -1,0 +1,36 @@
+{% if workers %}
+<div class="workers">
+{% for w in workers %}
+  <article class="card worker" data-worker="{{ w.id }}" data-name="{{ w.name }}" data-state="{{ w.state }}"{% if w.hot %} data-hot="true"{% endif %}>
+    <div class="worker-head">
+      <h3 class="num">{{ w.name }}</h3>
+      <span class="wdot" data-dot="{{ w.dot }}" role="img" aria-label="{{ w.dot|capitalize }}" title="{{ w.dot|capitalize }}"></span>
+      <span class="temp num" data-temp{% if w.temp.hot %} data-hot="true"{% endif %}>{{ w.temp.text }}{% if w.temp.hot %} · Hot{% endif %}</span>
+    </div>
+    <p class="task" data-task>{{ w.task }} — {{ w.detail }}</p>
+    {% if w.progress %}
+    <div class="progress" data-progress>
+      {% if w.progress.pct is none %}
+      <div class="bar live" role="img" aria-label="Running continuously"><span></span></div>
+      <span class="num pct" data-progress-text>{{ w.progress.text }}</span>
+      {% else %}
+      <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ w.progress.pct|round|int }}"><span style="width:{{ w.progress.pct }}%"></span></div>
+      <span class="num pct" data-progress-text>{{ w.progress.text }}</span>
+      {% endif %}
+    </div>
+    {% endif %}
+    <div class="meters">
+      {% for key, label, val in (("cpu", "CPU", w.cpu_pct), ("ram", "RAM", w.ram_pct)) %}
+      <div class="meter" data-meter="{{ key }}">
+        <span class="label">{{ label }}</span>
+        <span class="num" data-meter-text>{% if val is none %}-{% else %}{{ val|round|int }}%{% endif %}</span>
+        <div class="bar small"><span style="width:{{ 0 if val is none else val }}%"></span></div>
+      </div>
+      {% endfor %}
+    </div>
+  </article>
+{% endfor %}
+</div>
+{% else %}
+<p class="empty" data-empty="workers">No workers enrolled yet.</p>
+{% endif %}

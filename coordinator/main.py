@@ -5,7 +5,8 @@ import logging
 
 import uvicorn
 
-from coordinator import db
+from coordinator import db, recovery
+from coordinator.leases import lease_seconds
 from coordinator.api.app import create_app
 from coordinator.config import Config
 from coordinator.loop import LoopThread
@@ -19,6 +20,10 @@ def main() -> None:
     config = Config.from_env()
     applied = db.migrate(config.database_url)
     log.info("migrations applied: %s", applied or "none")
+    with db.connect(config.database_url) as conn:
+        kept = recovery.startup_grace(conn, lease_seconds(conn))
+    if kept:
+        log.info("kept %d running job(s) alive while their workers reconnect", kept)
     app = create_app(config)
     status = app.state.broker_status
     log.info("trading mode: %s (broker connected: %s)", status.broker.mode, status.broker.connected)

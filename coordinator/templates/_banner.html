@@ -1,0 +1,6 @@
+{% if header.banner %}
+<div class="banner" data-banner role="alert">
+  <p>{{ header.banner }}</p>
+  {% if header.paused_reason %}<p class="reason" data-banner-reason>{{ header.paused_reason }}</p>{% endif %}
+</div>
+{% endif %}

@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Fleet{% endblock %}
+{% block content %}
+<h1 class="sr-only">Fleet</h1>
+<section aria-label="Summary" data-region="tiles">{% include "_tiles.html" %}</section>
+
+<div class="split">
+  <section class="workers-section" aria-labelledby="h-workers">
+    <h2 class="section" id="h-workers">Workers</h2>
+    <div data-region="workers">{% include "_workers.html" %}</div>
+  </section>
+
+  <aside class="card assign" aria-labelledby="h-assign" data-panel="assign">
+    <h2 class="section" id="h-assign">Assign a job</h2>
+    {% set pick = (assign.jobs | selectattr("available") | list | first) or (assign.jobs | first) %}
+    <label class="field" for="assign-kind">What to do</label>
+    <select id="assign-kind" data-field="kind">
+      {% for j in assign.jobs %}
+      <option value="{{ j.kind }}" data-hint="{{ j.help }}" data-needs-model="{{ 'true' if j.needs_model else 'false' }}"{% if not j.available %} disabled{% endif %}{% if j.kind == pick.kind %} selected{% endif %}>{{ j.label }}{% if not j.available %} (coming soon){% endif %}</option>
+      {% endfor %}
+    </select>
+    <p class="help" data-help>{{ pick.help }}</p>
+
+    <div data-field-wrap="model"{% if not pick.needs_model %} hidden{% endif %}>
+      <label class="field" for="assign-model">Which model</label>
+      <select id="assign-model" data-field="model" data-region-select="model-options">{% include "_model_options.html" %}</select>
+    </div>
+
+    <label class="field" for="assign-worker">Which worker</label>
+    <select id="assign-worker" data-field="worker" data-region-select="worker-options">{% include "_worker_options.html" %}</select>
+
+    <button type="button" class="btn primary" data-action="assign"{% if not pick.available %} disabled{% endif %}>Assign job</button>
+    <p class="confirm" data-confirm role="status" aria-live="polite"></p>
+  </aside>
+</div>
+
+<section aria-labelledby="h-jobs">
+  <h2 class="section" id="h-jobs">Previous jobs</h2>
+  <div data-region="jobs">{% include "_jobs.html" %}</div>
+</section>
+{% endblock %}
