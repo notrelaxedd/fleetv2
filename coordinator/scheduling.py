@@ -188,6 +188,9 @@ def run_again(conn: psycopg.Connection, job_id: Any) -> CreateResult:
     if not can_run_again(job):
         raise Conflict("this job cannot be run again; start it from the Models screen")
     params = dict(job["params"] or {})
+    if job["kind"] == "final_check" and conn.execute("SELECT 1 FROM final_checks WHERE model_id = %s",
+                                                     (job["model_id"],)).fetchone():
+        raise Conflict("This model's Final check result is already kept: it never runs again")
     if job["kind"] == "model_search":
         if conn.execute("SELECT 1 FROM jobs WHERE kind = 'model_search' AND status IN ('queued','leased','cancel_requested')").fetchone():
             raise Conflict("Model search is already running")

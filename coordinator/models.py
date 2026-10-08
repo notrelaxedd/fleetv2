@@ -22,7 +22,11 @@ STATUS_TEXT = {"backtested": "Backtested", "paper_trading": "Paper trading", "re
 
 
 def sync_starters(conn: psycopg.Connection) -> int:
-    """Insert (or refresh the wording of) the starter models; metrics and status are kept."""
+    """Insert (or refresh the wording of) the starter models; metrics and status are kept.
+    The futures starters sit beside them (coordinator.futures_models)."""
+    from coordinator import futures_models
+
+    futures_models.sync_starters(conn)
     for name, module in REGISTRY.items():
         check_module(module)
         conn.execute(
@@ -77,7 +81,7 @@ def held_out_start(conn: psycopg.Connection, market: str) -> int:
 
 
 def job_params(conn: psycopg.Connection, kind: str, model_id: str | None, params: dict[str, Any],
-               limits: Limits) -> dict[str, Any]:
+               limits: Limits, rules: Any = None) -> dict[str, Any]:
     """Fill in what a worker needs, so it never has to ask the coordinator for the model."""
     if kind == "data_refresh":
         markets = params.get("markets") or ["stocks", "crypto"]
@@ -88,6 +92,10 @@ def job_params(conn: psycopg.Connection, kind: str, model_id: str | None, params
         if not model_id:
             raise BadRequest("Pick a model for this job")
         model = get_model(conn, model_id)
+        if model["market"] == "futures":
+            from coordinator import futures_models
+
+            return futures_models.backtest_params(conn, model, rules)
         return {
             "model_id": model["id"],
             "module": model["module"],
@@ -101,8 +109,15 @@ def job_params(conn: psycopg.Connection, kind: str, model_id: str | None, params
     return params
 
 
+# What a futures model's search found it with, kept when its backtest is run again.
+FOUND_WITH = ("train_score", "seed", "parent", "found_by")
+
+
 def store_backtest(conn: psycopg.Connection, model_id: str, metrics: dict[str, Any], job_id: str | None) -> dict[str, Any]:
     """Keep the latest backtest of a model; a model never tested becomes Backtested."""
+    old = conn.execute("SELECT market, metrics FROM models WHERE id = %s", (model_id,)).fetchone()
+    if old is not None and old["market"] == "futures" and old["metrics"]:
+        metrics = {**{k: old["metrics"][k] for k in FOUND_WITH if k in old["metrics"]}, **metrics}
     row = conn.execute(
         """
         UPDATE models SET metrics = %s, backtested_at = now(),

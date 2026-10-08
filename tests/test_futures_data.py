@@ -492,3 +492,40 @@ def test_futures_models_and_the_forever_final_check_table(conn):
         conn.execute("DELETE FROM final_checks WHERE model_id = 'f1'")
     with pytest.raises(Exception):
         conn.execute("INSERT INTO final_checks (model_id, feed, result) VALUES ('f1', 'databento', '{}')")
+
+
+def arrays(raw: bytes) -> dict[str, np.ndarray]:
+    with np.load(io.BytesIO(raw), allow_pickle=False) as z:
+        return {k: z[k] for k in z.files if k != "meta"}
+
+
+def test_later_periods_never_reach_an_earlier_one(conn, few_days):
+    """Change every price after training (then after held-out): the training file (then
+    the held-out file) stays exactly the same, bar for bar."""
+    fill(conn)
+    periods = fd.futures_periods(conn)
+    sizes = {}
+    for through in ("train", "held_out"):
+        before = arrays(fd.payload(conn, through)[0])
+        sizes[through] = before["MES_t"].shape[0]
+        cutoff = fd.period_cutoff(periods, through)
+        conn.execute("UPDATE bars SET open = open * 3, high = high * 3, low = low * 3, close = close * 3 "
+                     "WHERE timeframe = '1Min' AND ts >= %s", (cutoff,))
+        conn.execute("UPDATE bar_status SET refreshed_at = clock_timestamp() WHERE timeframe = '1Min'")
+        after = arrays(fd.payload(conn, through)[0])
+        assert after.keys() == before.keys()
+        for k in before:
+            assert np.array_equal(after[k], before[k]), k
+    lockbox = arrays(fd.payload(conn, "lockbox")[0])
+    assert lockbox["MES_t"].shape[0] > sizes["held_out"] > sizes["train"]
+
+
+def test_run_again_never_reopens_a_kept_final_check(client, conn):
+    from coordinator import queue
+    conn.execute("INSERT INTO models (id, name, module, market, description, how_it_works) "
+                 "VALUES ('f1', 'F', 'opening_range', 'futures', 'd', 'h')")
+    job = conn.execute("INSERT INTO jobs (kind, status, model_id) VALUES ('final_check', 'failed', 'f1') "
+                       "RETURNING id").fetchone()["id"]
+    conn.execute("INSERT INTO final_checks (model_id, feed, result) VALUES ('f1', 'databento', '{}')")
+    with pytest.raises(Exception, match="never runs again"):
+        queue.run_again(conn, job)

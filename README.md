@@ -70,12 +70,8 @@ Where the prices come from:
   earn a "ready for a Combine" verdict.
 - **Synthetic** in demo mode (`FLEET_FAKE_BROKER=1`): made-up prices, labelled so.
 
-To load them, start a **Futures prices** job on box1:
-
-```bash
-docker compose exec coordinator python -m coordinator.cli futures-prices
-```
-
+To load them, press **Load futures prices** on the Models screen's Futures view (or
+run `docker compose exec coordinator python -m coordinator.cli futures-prices` on box1).
 It downloads a month of one symbol at a
 time (about 90 steps for the full history, so give it a while the first time), and only
 adds what is new after that. If you add a Databento key later, the next Futures prices
@@ -122,7 +118,8 @@ run at once (`Conflicts=` in the service file).
 
 ## Using it
 
-The dashboard has two screens, **Fleet** and **Models**. The header shows the trading
+The dashboard has two screens, **Fleet** and **Models** (with a Futures view, see
+"Futures on the Models screen"). The header shows the trading
 mode, whether stocks and crypto are open, and the Pause all trading button.
 
 ![Models screen](docs/screenshots/stage5-models-desktop.png)
@@ -186,6 +183,80 @@ Each can go long or short, decides on 1-, 3-, 5- or 15-minute bars, and has an o
 stop and target in ticks; model search tries all of these. Every one passes the
 cut-off test (`tests/test_futures_cutoff.py`).
 
+## Futures on the Models screen
+
+![Futures view](docs/screenshots/futures-models-desktop.png)
+
+(Demo data: synthetic prices and made-up test fees, so it is labelled "Synthetic prices"
+and can never be ready.)
+
+**Models → Futures** (the tab above the list) is the futures research screen. At the
+top it says where the futures prices come from ("proxy" when they are the SPY/QQQ
+stand-in, "synthetic" in demo mode), with two buttons:
+
+- **Load futures prices** starts a Futures prices job (see "Futures prices").
+- **Start model search** searches the five futures model files. It stays greyed out,
+  with "Set the fee in config/topstep.toml" under it, until the commissions are filled
+  in there. One search runs at a time, stocks and crypto or futures.
+
+How futures model search works:
+
+- **Score**: training is cut into four back-to-back parts. In each part the model's
+  daily profit and loss at one contract and **double slippage** gives a Sharpe ratio
+  (return against how bumpy it was). The score is the worst of the four, so a setting
+  that only worked in one stretch scores low.
+- **Gates**: it must trade on at least 100 different training days and make money at
+  normal and at double slippage.
+- **Proposals**: half of each round's settings are random, half are small changes to
+  the models already kept. Every setting can be made again from its seed text, which
+  names the parent model for a change.
+- **Robustness**: the best setting of a round is tried again with each number moved 10%
+  down and 10% up. If the middle one of those scores under half as well, the winner sat
+  on a lucky peak and is dropped.
+- **Keeping**: at most five found models per model file. A new find replaces the kept
+  model with the most similar settings when it scores higher. A find whose daily
+  results move more than 90% like a kept model's is the same idea twice: it only
+  replaces that model if it scores higher.
+- **Chance this is luck**: every setting tried is counted. The more tries, the more one
+  of them looks good by luck alone; this figure (the deflated Sharpe ratio) says how
+  likely that is for each model. Lower is better.
+- Settings are tried on every core of the worker at once, and the prices are downloaded
+  once and kept until they change. Stop model search stops it within a second.
+
+The list is ranked by **expected net dollars per Combine attempt on the held-out
+period**, at the model's best contract size. Only a model that beats its **coin-flip
+twin** (a higher pass rate and more money per attempt than the same trades with random
+directions) gets a rank, and nothing is ranked until the fees and the payout cap are set.
+Pick a model to see its pass rate, median days to pass, expected payout and net, contract
+size, worst day, best-day share, trades per day, average hold, its result at double
+slippage and the chance it is luck, each with the coin-flip twin's number beside it,
+plus a chart of its held-out profit and loss against the twin's.
+
+**Run backtest** tests a futures model on training and held-out prices. **Final check**
+opens the lockbox, the last 15% of the prices, for that one model: it runs once, at the
+contract size the held-out test chose, and its result is kept forever (the database
+refuses to change or delete it). It needs real Databento prices, so the lockbox is never
+spent on stand-in prices.
+
+Futures models never place orders. There is no paper trading, shadow trading or
+Topstep connection in this build; starting paper trading on a futures model is refused.
+
+### What "ready for a Combine" requires
+
+A model is shown as ready for a Combine only when every line of its checklist is ticked:
+
+1. **Real futures prices** (Databento). Proxy or synthetic prices never count.
+2. **Held-out**: expected net dollars per attempt above zero (so the fees must be set).
+3. **Held-out**: it passes at least 10 percentage points more often than its coin-flip
+   twin (`min_pass_rate_edge` in `config/topstep.toml`).
+4. **Held-out**: it makes money at double slippage.
+5. **Lockbox Final check**: it makes money, and its pass rate is at most 15 points below
+   the held-out one (`max_lockbox_drop`).
+6. **Shadow trading**: at least 20 trading days on live prices, inside the range the
+   backtest predicted. This is not built yet (it comes later, only with your OK), so
+   **no model shows as ready in this build**. Expect most searches to end with "nothing
+   good enough yet"; that answer is worth having before paying for a Combine.
+
 ## Topstep's rules (config/topstep.toml)
 
 Futures models are judged on what Topstep pays for, not on ROI. A simulator
@@ -237,8 +308,10 @@ What each number means:
 
 What the simulator reports for a model, at each contract size it tries:
 
-- **Pass rate**: of the Combine attempts that finished inside the period, the share that
-  passed. Attempts still going when the period ends are left out, not guessed.
+- **Pass rate**: one Combine attempt starts on every day of the period that has 60
+  trading days left after it; the pass rate is the share that pass. An attempt that has
+  neither passed nor failed after 60 trading days counts as given up, after paying about
+  three months of fees (`combine_max_days`, our own assumption).
 - **Median days to pass**: trading days from start to pass, for the attempts that
   passed.
 - **Expected payout**: the average paid out per attempt in the Express Funded account
@@ -330,5 +403,7 @@ Neither is switched on without the owner's OK. See `PLAN.md`.
 
 - **Paid data**: Alpaca's SIP feed (`ALPACA_DATA_FEED=sip`), with each bar set recording
   which feed it came from.
-- **Topstep funded futures**: a second broker beside Alpaca, with its own safety checks.
-  Topstep's terms and API cost need checking first.
+- **Topstep funded futures**: the research side is built (see "Futures prices" and
+  "Futures on the Models screen"). Shadow trading on live futures prices and a Topstep
+  connection (TopstepX / ProjectX) are not: they are stage 6 of `docs/DAYTRADING_PLAN.md`
+  and need your OK, Topstep's terms and the API cost checked first.

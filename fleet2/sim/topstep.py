@@ -15,8 +15,10 @@ The Combine, for one attempt starting on day s (balance = account size):
 - Daily loss limit (when set): a day that falls that far ends at that loss.
 - Passes at the end of a day when profit >= profit_target and the best day passes the
   consistency rule (best day <= best_day_share x the target, or x the total profit).
-- An attempt still running when the period ends is "unfinished" and left out of every
-  rate (counted separately), rather than guessed.
+- An attempt that has neither passed nor failed after combine_max_days trading days is
+  given up (still paying the monthly fee until then). Attempts only start on days with
+  that many days left in the period, so every attempt is counted the same way and none
+  is cut short by the end of the prices.
 
 The Express Funded account (only after a pass, from the next day, for at most
 express_days trading days): the same floor; a payout once there have been
@@ -69,6 +71,7 @@ class Rules:
     activation: float | None = None
     slippage_ticks: float = 1.0
     express_days: int = 120
+    combine_max_days: int = 60
     days_per_month: int = 21
     twin_seeds: int = 10
     max_sizes: int = 10
@@ -167,6 +170,7 @@ def load_rules(path: Path) -> Rules:
         activation=_number(fees, "activation", f"{where} [fees]", 0, 1e5, default=None),
         slippage_ticks=_number(costs, "slippage_ticks", f"{where} [costs]", 0, 100, default=1.0),
         express_days=_number(sim, "express_days", f"{where} [simulator]", 1, 2000, default=120, integer=True),
+        combine_max_days=_number(sim, "combine_max_days", f"{where} [simulator]", 1, 2000, default=60, integer=True),
         days_per_month=_number(sim, "days_per_month", f"{where} [simulator]", 1, 31, default=21, integer=True),
         twin_seeds=_number(sim, "twin_seeds", f"{where} [simulator]", 1, 1000, default=10, integer=True),
         max_sizes=_number(sim, "max_sizes", f"{where} [simulator]", 1, 1000, default=10, integer=True),
@@ -207,15 +211,18 @@ def trace(pnl: list[float], dip: list[float], rules: Rules) -> list[dict[str, An
         floor = min(max(floor, high - rules.max_loss_limit), start)
         allowed = rules.best_day_share * (rules.profit_target if rules.consistency_kind == "target" else bal - start)
         passed = bal - start >= rules.profit_target and best <= allowed + 1e-9
-        out.append({**row, "balance": bal, "floor_after": floor, "outcome": "passed" if passed else "running"})
-        if passed:
+        gave_up = not passed and len(out) + 1 >= rules.combine_max_days
+        out.append({**row, "balance": bal, "floor_after": floor,
+                    "outcome": "passed" if passed else "gave up" if gave_up else "running"})
+        if passed or gave_up:
             break
     return out
 
 
 def combine(pnl: np.ndarray, dip: np.ndarray, rules: Rules) -> dict[str, np.ndarray]:
-    """One Combine attempt starting on every day. Returns per start day: state (1 passed,
-    2 failed, 0 unfinished), days (trading days used) and end (the day it ended, -1)."""
+    """One Combine attempt starting on every day that has combine_max_days days left.
+    Returns per start day: state (1 passed, 2 failed, 3 given up, 0 not started: too
+    late in the period), days (trading days used) and end (the day it ended, -1)."""
     pnl, dip = _daily_limit(np.asarray(pnl, float), np.asarray(dip, float), rules)
     n = pnl.shape[0]
     start = float(rules.account_size)
@@ -227,7 +234,9 @@ def combine(pnl: np.ndarray, dip: np.ndarray, rules: Rules) -> dict[str, np.ndar
     days = np.zeros(n, dtype=np.int64)
     end = np.full(n, -1, dtype=np.int64)
     first = np.arange(n)
-    for k in range(n):
+    started = first + rules.combine_max_days <= n
+    state[~started] = -1  # placeholder while running: these never start
+    for k in range(min(n, rules.combine_max_days)):
         a = first[(state == 0) & (first + k < n)]
         if a.size == 0:
             break
@@ -244,6 +253,9 @@ def combine(pnl: np.ndarray, dip: np.ndarray, rules: Rules) -> dict[str, np.ndar
         allowed = rules.best_day_share * (rules.profit_target if rules.consistency_kind == "target" else profit)
         passed = (profit >= rules.profit_target) & (best[a] <= allowed + 1e-9)
         state[a[passed]], end[a[passed]] = 1, day[passed]
+    still = state == 0
+    state[still], end[still] = 3, first[still] + days[still] - 1
+    state[~started] = 0
     return {"state": state, "days": days, "end": end}
 
 
@@ -295,38 +307,38 @@ def simulate(pnl: np.ndarray, dip: np.ndarray, rules: Rules) -> dict[str, Any]:
     unset); money is computed by net_per_attempt so fees can be filled in later."""
     pnl, dip = np.asarray(pnl, float), np.asarray(dip, float)
     c = combine(pnl, dip, rules)
-    finished = c["state"] != 0
-    n_fin = int(finished.sum())
+    started = c["state"] != 0
+    n = int(started.sum())
     passed = c["state"] == 1
     out: dict[str, Any] = {
-        "attempts": int(pnl.shape[0]),
-        "finished": n_fin,
-        "unfinished": int((~finished).sum()),
+        "attempts": n,
+        "late_starts": int((~started).sum()),
         "passed": int(passed.sum()),
         "failed": int((c["state"] == 2).sum()),
-        "pass_rate": float(passed.sum() / n_fin) if n_fin else None,
-        "fail_rate": float((c["state"] == 2).sum() / n_fin) if n_fin else None,
+        "gave_up": int((c["state"] == 3).sum()),
+        "pass_rate": float(passed.sum() / n) if n else None,
+        "fail_rate": float((c["state"] == 2).sum() / n) if n else None,
         "median_days_to_pass": float(np.median(c["days"][passed])) if passed.any() else None,
-        "mean_months": float(np.mean(np.ceil(c["days"][finished] / rules.days_per_month))) if n_fin else None,
+        "mean_months": float(np.mean(np.ceil(c["days"][started] / rules.days_per_month))) if n else None,
         "mean_paid": None, "mean_payouts": None, "express_breached": None, "express_cut": None,
         "payout_note": None,
     }
     if rules.max_payout is None:
         out["payout_note"] = PAYOUT_CAP_MESSAGE
         return out
-    if n_fin:
+    if n:
         e = express(pnl, dip, c["end"][passed] + 1, rules)
-        out["mean_paid"] = float(e["paid"].sum() / n_fin)
-        out["mean_payouts"] = float(e["payouts"].sum() / n_fin)
+        out["mean_paid"] = float(e["paid"].sum() / n)
+        out["mean_payouts"] = float(e["payouts"].sum() / n)
         out["express_breached"] = float(e["breached"].mean()) if passed.any() else None
-        out["express_cut"] = int(e["cut"].sum())
+        out["express_cut"] = int(e["cut"].sum())  # Express accounts the period ended early: counted as they stood
     return out
 
 
 def net_per_attempt(sim: dict[str, Any], rules: Rules) -> float | None:
     """Expected dollars to you per Combine attempt: your share of the payouts, minus the
     monthly Combine fees, minus the activation fee when it passes. None while a fee or
-    the payout cap is unset, or the period had no finished attempt."""
+    the payout cap is unset, or the period was too short for any attempt."""
     if not rules.account_fees_set() or sim.get("mean_paid") is None or sim.get("mean_months") is None:
         return None
     return float(rules.profit_split * sim["mean_paid"] - rules.combine_monthly * sim["mean_months"]
@@ -343,12 +355,14 @@ def money_note(rules: Rules) -> str | None:
 
 
 def average(sims: list[dict[str, Any]]) -> dict[str, Any]:
-    """The mean of several simulations (the coin-flip twins), None where any is None."""
+    """The mean of several simulations (the coin-flip twins): each number averaged over
+    the twins that have one (a twin with no pass has no days to pass), None if none has."""
     out: dict[str, Any] = {}
     for key in sims[0]:
         values = [s[key] for s in sims]
-        if all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values):
-            out[key] = float(np.mean(values))
+        numbers = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        if numbers and len(numbers) == len([v for v in values if v is not None]):
+            out[key] = float(np.mean(numbers))
         else:
             out[key] = values[0] if all(v == values[0] for v in values) else None
     return out
@@ -368,6 +382,25 @@ def size_limit(worst_stretch_one: float, rules: Rules) -> tuple[int, bool]:
     return max(1, min(cap, fits)), fits < 1
 
 
+def day_rules(rules: Rules) -> Any:
+    """The backtester's end of day from the rules: flat at 15:00 (or earlier when flat_by
+    is earlier), and no new trades in the 10 minutes before that."""
+    from fleet2.sim.futures_backtest import DayRules
+
+    flat = rules.flat_minutes_before_close()
+    return DayRules(cutoff_before_close=10 + flat, flat_before_close=flat)
+
+
+def costs_of(rules: Rules, slippage_ticks: float | None = None) -> Any:
+    """The backtester's costs from the rules; ValueError while a commission is unset."""
+    from fleet2.sim.futures_backtest import FuturesCosts
+
+    if rules.missing_trading_fees():
+        raise ValueError(FEE_MESSAGE)
+    slip = rules.slippage_ticks if slippage_ticks is None else slippage_ticks
+    return FuturesCosts(slip, {s: float(v) for s, v in rules.commission_per_side.items()})
+
+
 def evaluate(data: Any, module: ModuleType, params: dict[str, Any], rules: Rules, first_day: int,
              last_day: int | None, max_size: int, should_stop: Callable[[], bool] | None = None,
              slippage_ticks: float | None = None) -> dict[str, Any]:
@@ -376,30 +409,25 @@ def evaluate(data: Any, module: ModuleType, params: dict[str, Any], rules: Rules
     period's numbers at one contract, at normal and at double slippage."""
     from fleet2.sim import futures_backtest as fb
 
-    if rules.missing_trading_fees():
-        raise ValueError(FEE_MESSAGE)
-    slip = rules.slippage_ticks if slippage_ticks is None else slippage_ticks
-    costs = fb.FuturesCosts(slip, {s: float(v) for s, v in rules.commission_per_side.items()})
-    day_rules = fb.DayRules(cutoff_before_close=10 + rules.flat_minutes_before_close(),
-                            flat_before_close=rules.flat_minutes_before_close())
+    costs = costs_of(rules, slippage_ticks)
+    end_of_day = day_rules(rules)
     targets = fb.model_targets(data, module, params)
     sizes: list[dict[str, Any]] = []
     one: Any = None
     for size in range(1, max(1, min(max_size, rules.max_micro_contracts)) + 1):
-        run = fb.run(data, module, params, costs, size, day_rules, first_day, last_day, None, should_stop, targets)
+        run = fb.run(data, module, params, costs, size, end_of_day, first_day, last_day, None, should_stop, targets)
         if size == 1:
             one = run
-        twins = [fb.run(data, module, params, costs, size, day_rules, first_day, last_day, seed, should_stop, targets)
+        twins = [fb.run(data, module, params, costs, size, end_of_day, first_day, last_day, seed, should_stop, targets)
                  for seed in range(1, rules.twin_seeds + 1)]
         sizes.append({"contracts": size, "sim": simulate(run.pnl, run.dip, rules),
                       "twin": average([simulate(t.pnl, t.dip, rules) for t in twins]),
                       "twin_pnl": float(np.mean([t.pnl.sum() for t in twins])),
                       "net_pnl": float(run.pnl.sum()), "worst_stretch": fb.worst_stretch(run.pnl, run.dip)})
-    double = fb.run(data, module, params, costs.doubled(), 1, day_rules, first_day, last_day, None, should_stop, targets)
-    twin_one = fb.run(data, module, params, costs, 1, day_rules, first_day, last_day, 1, should_stop, targets)
-    summary = fb.summarize(one)
+    double = fb.run(data, module, params, costs.doubled(), 1, end_of_day, first_day, last_day, None, should_stop, targets)
+    twin_one = fb.run(data, module, params, costs, 1, end_of_day, first_day, last_day, 1, should_stop, targets)
     return {
-        "summary": summary,
+        "numbers": fb.summarize(one),
         "double_slippage_pnl": round(float(double.pnl.sum()), 2),
         "twin_curve": fb.summarize(twin_one)["curve"],
         "sizes": sizes,

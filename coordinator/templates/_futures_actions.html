@@ -1,0 +1,8 @@
+{% set fc = selected.final_check %}
+<div class="mactions">
+  <button type="button" class="btn solid" data-action="run-backtest" data-model-id="{{ selected.id }}"{% if selected.retired %} disabled{% endif %}>Run backtest</button>
+  {% if not fc.stored %}<button type="button" class="btn" data-action="final-check" data-model-id="{{ selected.id }}"{% if fc.disabled %} disabled{% endif %}>Final check</button>{% endif %}
+</div>
+<p class="small{% if fc.stored %} fcheck{% else %} muted{% endif %}" data-final-check="{{ 'stored' if fc.stored else 'open' }}">{{ fc.text }}</p>
+{% if fc.reason %}<p class="muted small" data-final-reason>{{ fc.reason }}</p>{% endif %}
+<p class="muted small" data-paper-note>{{ selected.paper_note }}</p>

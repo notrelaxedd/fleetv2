@@ -124,6 +124,9 @@ slippage_ticks = 1
 # How the simulator replays a model. Our own choices, not Topstep's rules.
 # The Express Funded account is played for at most this many trading days.
 express_days = 120
+# A Combine that has neither passed nor failed after this many trading days is given up
+# (about three months of fees). Attempts only start where this many days are left.
+combine_max_days = 60
 # Trading days in a month, for counting monthly Combine fees.
 days_per_month = 21
 # Coin-flip twins averaged per model (same trade times, random direction).

@@ -83,11 +83,13 @@ def test_the_fast_combine_agrees_with_the_trace_from_every_start_day():
                  replace(RULES, daily_loss_limit=800.0)):
         fast = ts.combine(pnl, dip, rule)
         for s in range(0, 300, 7):
+            if s + rule.combine_max_days > 300:
+                assert fast["state"][s] == 0  # too late in the period to start
+                continue
             rows = ts.trace(pnl[s:].tolist(), dip[s:].tolist(), rule)
             outcome = rows[-1]["outcome"]
-            assert {"passed": 1, "failed": 2, "running": 0}[outcome] == fast["state"][s]
-            if outcome != "running":
-                assert fast["days"][s] == len(rows) and fast["end"][s] == s + len(rows) - 1
+            assert {"passed": 1, "failed": 2, "gave up": 3}[outcome] == fast["state"][s]
+            assert fast["days"][s] == len(rows) and fast["end"][s] == s + len(rows) - 1
 
 
 # ------------------------------------------------------------------ the Express Funded account
@@ -119,21 +121,32 @@ def test_payout_rules_winning_days_and_the_cap():
 
 
 def test_simulate_and_the_money_per_attempt():
-    # Day 0 and 1: +$1,500 each, so the attempt from day 0 passes on day 1 (2 days, 1 month).
-    # Express from day 2: five +$200 days, then a payout of $500.
+    # Attempts give up after 2 days here, so they start on days 0 to 5 (6 attempts).
+    # Day 0 and 1: +$1,500 each, so the attempt from day 0 passes on day 1 (2 days, 1 month);
+    # every other attempt gives up after 2 days (1 month). Express from day 2: five +$200
+    # days, then a payout of 50% of $1,000 = $500.
+    rule = replace(RULES, combine_max_days=2)
     pnl = np.array([1_500.0, 1_500.0, 200, 200, 200, 200, 200])
-    sim = ts.simulate(pnl, np.zeros(7), RULES)
-    assert sim["attempts"] == 7 and sim["passed"] == 1 and sim["finished"] == 1 and sim["unfinished"] == 6
-    assert sim["pass_rate"] == 1.0 and sim["median_days_to_pass"] == 2.0 and sim["mean_months"] == 1.0
-    assert sim["mean_paid"] == 500.0 and sim["mean_payouts"] == 1.0
-    # 90% of $500 = $450, minus one month at $50, minus the $100 activation fee = $300
-    assert ts.net_per_attempt(sim, RULES) == pytest.approx(300.0)
+    sim = ts.simulate(pnl, np.zeros(7), rule)
+    assert sim["attempts"] == 6 and sim["late_starts"] == 1 and sim["passed"] == 1 and sim["gave_up"] == 5
+    assert sim["pass_rate"] == pytest.approx(1 / 6) and sim["median_days_to_pass"] == 2.0 and sim["mean_months"] == 1.0
+    assert sim["mean_paid"] == pytest.approx(500.0 / 6) and sim["mean_payouts"] == pytest.approx(1 / 6)
+    # per attempt: 90% of $500 / 6 = $75, minus one month at $50, minus $100 activation x 1/6 = $8.33
+    assert ts.net_per_attempt(sim, rule) == pytest.approx(75.0 - 50.0 - 100.0 / 6)
+    assert ts.simulate(pnl, np.zeros(7), RULES)["pass_rate"] is None  # 7 days: too short for a 60-day attempt
+
+
+def test_an_attempt_gives_up_after_the_horizon():
+    rows = floors([100.0] * 10, rules=replace(RULES, combine_max_days=4))
+    assert [r["outcome"] for r in rows] == ["running", "running", "running", "gave up"]
+    c = ts.combine(np.full(10, 100.0), np.zeros(10), replace(RULES, combine_max_days=4))
+    assert c["state"].tolist() == [3] * 7 + [0] * 3 and c["days"][:7].tolist() == [4] * 7
 
 
 def test_unset_fees_and_cap_give_a_message_not_a_number():
-    unset = ts.Rules()
+    unset = ts.Rules(combine_max_days=2)
     sim = ts.simulate(np.array([1_500.0, 1_500.0, 200]), np.zeros(3), unset)
-    assert sim["pass_rate"] == 1.0 and sim["mean_paid"] is None and sim["payout_note"] == ts.PAYOUT_CAP_MESSAGE
+    assert sim["pass_rate"] == 0.5 and sim["mean_paid"] is None and sim["payout_note"] == ts.PAYOUT_CAP_MESSAGE
     assert ts.net_per_attempt(sim, unset) is None and ts.money_note(unset) == "Set the fee in config/topstep.toml"
     assert ts.money_note(replace(unset, combine_monthly=1.0, activation=1.0)) == ts.PAYOUT_CAP_MESSAGE
     assert ts.money_note(RULES) is None
@@ -153,7 +166,7 @@ def test_a_strategy_with_no_edge_rarely_passes():
     pnl = rng.normal(0, 250, 5000)
     rule = replace(RULES, consistency_kind="total_profit", best_day_share=1.0)
     sim = ts.simulate(pnl, np.minimum(pnl, 0), rule)
-    assert 0.1 < sim["pass_rate"] < 0.4
+    assert 0.02 < sim["pass_rate"] < 0.4
 
 
 # ------------------------------------------------------------------ the rules file
@@ -210,13 +223,14 @@ def test_evaluate_reports_every_size_with_its_coin_flip_twin():
     data = wiggly(days=20)
     model = scripted(every_20_minutes)
     small = replace(RULES, twin_seeds=3, account_size=50_000, profit_target=300.0, max_loss_limit=400.0,
-                    consistency_kind="total_profit", best_day_share=1.0, payout_min_day_profit=10.0, express_days=5)
+                    consistency_kind="total_profit", best_day_share=1.0, payout_min_day_profit=10.0, express_days=5,
+                    combine_max_days=5)
     out = ts.evaluate(data, model, None, small, 5, None, max_size=2)
     assert [s["contracts"] for s in out["sizes"]] == [1, 2]
-    assert out["summary"]["days"] == 15 and out["sim_key"] == small.sim_key() and out["feed"] == "test"
+    assert out["numbers"]["days"] == 15 and out["sim_key"] == small.sim_key() and out["feed"] == "test"
     for s in out["sizes"]:
-        assert set(s["sim"]) == set(s["twin"]) and s["sim"]["attempts"] == 15
-    assert out["double_slippage_pnl"] < out["summary"]["net_pnl"]
+        assert set(s["sim"]) == set(s["twin"]) and s["sim"]["attempts"] == 11 and s["twin"]["pass_rate"] is not None
+    assert out["double_slippage_pnl"] < out["numbers"]["net_pnl"]
     best = ts.best_size(out, small)
     assert best["contracts"] in (1, 2) and best["net"] == max(ts.net_per_attempt(s["sim"], small) for s in out["sizes"])
     assert ts.best_size(out, replace(small, activation=None)) is None

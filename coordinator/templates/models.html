@@ -2,21 +2,25 @@
 {% block title %}Models{% endblock %}
 {% block content %}
 <h1 class="sr-only">Models</h1>
-<div class="models{% if not models %} no-models{% endif %}" data-models-screen data-selected-id="{{ selected.id if selected else '' }}">
+<div class="models{% if not models %} no-models{% endif %}" data-models-screen data-selected-id="{{ selected.id if selected else '' }}" data-market="{{ 'futures' if view == 'futures' else '' }}">
   <section class="models-side" aria-label="All models">
+    <nav class="mtabs" aria-label="Markets">
+      <a href="/models" data-tab="stocks"{% if view != "futures" %} class="current" aria-current="page"{% endif %}>Stocks and crypto</a>
+      <a href="/models?market=futures" data-tab="futures"{% if view == "futures" %} class="current" aria-current="page"{% endif %}>Futures</a>
+    </nav>
     <div class="msearch">
-      <div data-region="models-search">{% include "_models_search.html" %}</div>
+      <div data-region="models-search">{% include parts.search %}</div>
       <p class="confirm" data-reply="search" role="status" aria-live="polite"></p>
     </div>
-    <div data-region="models-list">{% include "_models_list.html" %}</div>
+    <div data-region="models-list">{% include parts.list %}</div>
   </section>
 
   {% if selected %}
   <section class="model-detail" aria-label="Selected model" data-model-detail data-model-id="{{ selected.id }}">
-    <div data-region="model-head">{% include "_model_head.html" %}</div>
-    <div data-region="model-actions">{% include "_model_actions.html" %}</div>
+    <div data-region="model-head">{% include parts.head %}</div>
+    <div data-region="model-actions">{% include parts.actions %}</div>
     <p class="confirm" data-reply="model" role="status" aria-live="polite"></p>
-    <div data-region="model-results">{% include "_model_results.html" %}</div>
+    <div data-region="model-results">{% include parts.results %}</div>
   </section>
   {% endif %}
 </div>
