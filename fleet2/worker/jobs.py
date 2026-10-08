@@ -56,8 +56,15 @@ def run_backtest(params: dict[str, Any], checkpoint: dict[str, Any] | None, emit
     return run_backtest_job(params, checkpoint, emit, should_stop)
 
 
+def run_paper_trade(params: dict[str, Any], checkpoint: dict[str, Any] | None, emit: Emit, should_stop: ShouldStop) -> Any:
+    from fleet2.worker.paper_job import run_paper_trade as run
+
+    return run(params, checkpoint, emit, should_stop)
+
+
 JOBS: dict[str, JobFunc] = {
     "sleep": run_sleep,
     "data_refresh": run_data_refresh,
     "backtest": run_backtest,
+    "paper_trade": run_paper_trade,
 }

@@ -33,7 +33,7 @@ JOB_CHOICES = (
 )
 NEEDS_MODEL = ("backtest", "paper_trade")
 # Job kinds the workers can run in this build; the others are listed but not offered yet.
-AVAILABLE_KINDS: tuple[str, ...] = ("sleep", "data_refresh", "backtest")
+AVAILABLE_KINDS: tuple[str, ...] = ("sleep", "data_refresh", "backtest", "paper_trade")
 PAUSED_BANNER = "All trading is paused. No model will place orders until you resume. Backtests keep running."
 
 

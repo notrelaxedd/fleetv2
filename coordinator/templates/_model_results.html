@@ -1,0 +1,29 @@
+{% if selected.tested %}
+{% set chart = selected.chart %}
+<section class="card chart-card" aria-labelledby="h-chart" data-chart-card>
+  <h3 class="section" id="h-chart">{{ chart.title }}</h3>
+  <ul class="legend" data-legend-list>
+    <li data-legend="model"><i class="sw solid" aria-hidden="true"></i>{{ chart.model_label }}</li>
+    {% if chart.benchmark | reject("none") | list %}<li data-legend="benchmark"><i class="sw dashed" aria-hidden="true"></i>{{ chart.benchmark_label }}</li>{% endif %}
+  </ul>
+  {{ selected.chart_svg }}
+  <p class="muted small" data-period>{{ selected.period }}</p>
+  {% if selected.training_line %}<p class="muted small" data-training>{{ selected.training_line }}</p>{% endif %}
+</section>
+
+<section aria-labelledby="h-numbers">
+  <h3 class="section" id="h-numbers">What the numbers mean</h3>
+  <div class="mcards" data-metrics>
+  {% for c in selected.metrics %}
+    <article class="mcard" data-metric="{{ c.key }}" data-tone="{{ c.tone }}">
+      <h4 class="mlabel" data-label>{{ c.label }}</h4>
+      <p class="mvalue num" data-value>{{ c.value }}</p>
+      <p class="mdescr" data-description>{{ c.description }}</p>
+      {% if c.note %}<p class="mnote" data-note>{{ c.note }}</p>{% endif %}
+    </article>
+  {% endfor %}
+  </div>
+</section>
+{% else %}
+<p class="empty" data-untested>{{ selected.untested }}</p>
+{% endif %}

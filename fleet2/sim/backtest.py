@@ -87,12 +87,14 @@ class Run:
 Progress = Callable[[float], None]
 
 
-def _cap_targets(weights: dict[str, float], equity: float, limits: Limits) -> dict[str, float]:
+def _cap_targets(weights: dict[str, float], equity: float, limits: Limits, reserved: float = 0.0) -> dict[str, float]:
     """Dollar targets: weight x equity, each at most max_per_position, all together at
-    most max_per_model (scaled down evenly when over)."""
+    most max_per_model (scaled down evenly when over). `reserved` is money already
+    tied up in positions that cannot trade right now (no bar): it counts against the
+    model's total, so a stuck position never lets the model invest past its cap."""
     dollars = {s: min(w * equity, limits.max_per_position) for s, w in weights.items()}
     total = sum(dollars.values())
-    budget = min(limits.max_per_model, max(equity, 0.0))
+    budget = min(limits.max_per_model, max(equity, 0.0)) - reserved
     if total > budget > 0:
         dollars = {s: d * budget / total for s, d in dollars.items()}
     elif budget <= 0:
@@ -117,6 +119,7 @@ def run_backtest(
     params = params_with_defaults(model, params)
     costs = COSTS[data.market]
     every = max(1, int(model.rebalance_every(params)))
+    # A model symbol with no data at all is simply never tradable (no bar to fill at).
     rows = {s: data.row(s) for s in model.SYMBOLS if s in data.symbols}
     value_px = data.last_close()
     stop = min(stop, data.n_bars)
@@ -174,7 +177,10 @@ def run_backtest(
         if (i - start) % every == 0:
             weights = clean_targets(model.target_positions(History(data, i), params), model.SYMBOLS)
             prev_equity = marked(i - 1) if i > 0 else cash
-            wanted = _cap_targets(weights, prev_equity, limits)
+            tradable = {s for s in rows if not np.isnan(data.open[rows[s], i]) and data.open[rows[s], i] > 0}
+            stuck = sum(qty * np.nan_to_num(value_px[rows[s], i - 1] if i > 0 else 0.0)
+                        for s, qty in shares.items() if s not in tradable)
+            wanted = _cap_targets({s: w for s, w in weights.items() if s in tradable}, prev_equity, limits, stuck)
             t = int(data.times[i])
             orders = []
             for symbol in set(shares) | set(wanted):
@@ -194,6 +200,8 @@ def run_backtest(
             raise JobStopped()
         if progress is not None and (i - start) % report_every == 0:
             progress((i - start + 1) / (stop - start))
+    if progress is not None:
+        progress(1.0)
 
     last = stop - 1
     end_t = int(data.times[last])
@@ -220,7 +228,7 @@ def buy_and_hold(data: MarketData, symbol: str, start: int, stop: int, money: fl
     row = data.row(symbol)
     opens = data.open[row, start:stop]
     first = int(np.argmax(~np.isnan(opens))) if (~np.isnan(opens)).any() else None
-    out = np.full(stop - start, money)
+    out = np.full(stop - start, float(money))
     if first is None:
         return out
     qty = money / (opens[first] * (1.0 + costs.rate))

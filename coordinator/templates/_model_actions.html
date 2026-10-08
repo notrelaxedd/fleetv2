@@ -1,0 +1,11 @@
+{% set paper_off = (not selected.tested) or selected.retired %}
+<div class="mactions">
+  <button type="button" class="btn solid" data-action="run-backtest" data-model-id="{{ selected.id }}">Run backtest</button>
+  <button type="button" class="btn" data-action="{{ 'paper-stop' if selected.paper_trading else 'paper-start' }}" data-model-id="{{ selected.id }}"{% if paper_off %} disabled{% endif %}>{{ selected.paper_button }}</button>
+</div>
+{% if paper_off %}
+<p class="muted small" data-paper-reason>{% if selected.retired %}This model is retired, so it cannot paper trade.{% else %}Run a backtest first. A model has to be tested before it can paper trade.{% endif %}</p>
+{% endif %}
+{% if selected.paper and selected.paper.line %}
+<p class="paperline" data-paper-line data-tone="{{ selected.paper.tone or 'plain' }}">{{ selected.paper.line }}</p>
+{% endif %}

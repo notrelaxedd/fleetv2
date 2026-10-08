@@ -1,6 +1,23 @@
 {% extends "base.html" %}
 {% block title %}Models{% endblock %}
 {% block content %}
-<h1>Models</h1>
-<p class="empty" data-placeholder="models">The Models screen arrives in stage 3.</p>
+<h1 class="sr-only">Models</h1>
+<div class="models{% if not models %} no-models{% endif %}" data-models-screen data-selected-id="{{ selected.id if selected else '' }}">
+  <section class="models-side" aria-label="All models">
+    <div class="msearch">
+      <div data-region="models-search">{% include "_models_search.html" %}</div>
+      <p class="confirm" data-reply="search" role="status" aria-live="polite"></p>
+    </div>
+    <div data-region="models-list">{% include "_models_list.html" %}</div>
+  </section>
+
+  {% if selected %}
+  <section class="model-detail" aria-label="Selected model" data-model-detail data-model-id="{{ selected.id }}">
+    <div data-region="model-head">{% include "_model_head.html" %}</div>
+    <div data-region="model-actions">{% include "_model_actions.html" %}</div>
+    <p class="confirm" data-reply="model" role="status" aria-live="polite"></p>
+    <div data-region="model-results">{% include "_model_results.html" %}</div>
+  </section>
+  {% endif %}
+</div>
 {% endblock %}

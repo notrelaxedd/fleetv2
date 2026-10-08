@@ -1,0 +1,9 @@
+<div data-region="status">{% include "_status.html" %}</div>
+<div data-region="banner">{% include "_banner.html" %}</div>
+<div data-region="models-search">{% include "_models_search.html" %}</div>
+<div data-region="models-list">{% include "_models_list.html" %}</div>
+{% if selected %}
+<div data-region="model-head">{% include "_model_head.html" %}</div>
+<div data-region="model-actions">{% include "_model_actions.html" %}</div>
+<div data-region="model-results">{% include "_model_results.html" %}</div>
+{% endif %}

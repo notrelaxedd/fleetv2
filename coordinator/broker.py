@@ -1,8 +1,9 @@
 """The coordinator's only door to Alpaca (alpaca-py). Nothing else imports alpaca.
 
-Stage 1 is read-only: the market clock (are stocks open, when do they close) and the
-account (value, today's change). Orders arrive in stage 4 and go through
-coordinator.safety first.
+It reads the market clock (are stocks open, when do they close) and the account
+(value, today's change), and places market orders. Every order reaches place_order()
+only through coordinator.safety.approve_and_place(), which checks the pause switch,
+the daily loss limit and the money limits first and logs the order.
 
 Mode: paper, always, unless ALPACA_LIVE=true is set in .env AND the owner confirmed
 live in the dashboard AND live keys are present. The broker never switches mode on its
@@ -60,6 +61,26 @@ class AccountInfo:
         return 100.0 * self.day_change / self.last_equity if self.last_equity else 0.0
 
 
+@dataclass(frozen=True)
+class OrderState:
+    """Where an order stands at the broker, in our own words."""
+
+    status: str  # submitted, partially_filled, filled, cancelled, rejected
+    filled_qty: float = 0.0
+    filled_avg_price: float | None = None
+    broker_order_id: str | None = None
+    error: str | None = None
+
+
+# Alpaca order statuses -> ours.
+STATUS_MAP = {
+    "filled": "filled",
+    "partially_filled": "partially_filled",
+    "canceled": "cancelled", "expired": "cancelled", "replaced": "cancelled", "stopped": "cancelled",
+    "rejected": "rejected", "suspended": "rejected",
+}
+
+
 class Broker(Protocol):
     """What the rest of the coordinator may ask of Alpaca."""
 
@@ -70,6 +91,11 @@ class Broker(Protocol):
     def clock(self) -> ClockInfo: ...
 
     def account(self) -> AccountInfo: ...
+
+    def place_order(self, client_order_id: str, symbol: str, side: str, notional: float | None = None,
+                    qty: float | None = None) -> OrderState: ...
+
+    def get_order(self, client_order_id: str) -> OrderState: ...
 
 
 class NoBroker:
@@ -85,6 +111,13 @@ class NoBroker:
         raise BrokerUnavailable(self.problem)
 
     def account(self) -> AccountInfo:
+        raise BrokerUnavailable(self.problem)
+
+    def place_order(self, client_order_id: str, symbol: str, side: str, notional: float | None = None,
+                    qty: float | None = None) -> OrderState:
+        raise BrokerUnavailable(self.problem)
+
+    def get_order(self, client_order_id: str) -> OrderState:
         raise BrokerUnavailable(self.problem)
 
 
@@ -123,6 +156,45 @@ class AlpacaBroker:
             buying_power=float(a.buying_power or 0),
         )
 
+    def place_order(self, client_order_id: str, symbol: str, side: str, notional: float | None = None,
+                    qty: float | None = None) -> OrderState:
+        """A market order: buys by dollar amount (notional), sells by quantity. Stocks use
+        time in force "day" (Alpaca requires it for fractional orders), crypto "gtc"."""
+        from alpaca.trading.enums import OrderSide, TimeInForce
+        from alpaca.trading.requests import MarketOrderRequest
+
+        crypto = "/" in symbol
+        request = MarketOrderRequest(
+            symbol=symbol,
+            notional=round(notional, 2) if notional is not None else None,
+            qty=round(qty, 9) if qty is not None else None,
+            side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
+            time_in_force=TimeInForce.GTC if crypto else TimeInForce.DAY,
+            client_order_id=client_order_id,
+        )
+        try:
+            order = self._client.submit_order(request)
+        except Exception as exc:  # noqa: BLE001 - the API's message is the useful part
+            return OrderState("rejected", error=f"Alpaca refused the order: {exc}")
+        return self._state(order)
+
+    def get_order(self, client_order_id: str) -> OrderState:
+        try:
+            order = self._client.get_order_by_client_id(client_order_id)
+        except Exception as exc:  # noqa: BLE001
+            raise BrokerUnavailable(f"Alpaca order lookup: {exc}") from None
+        return self._state(order)
+
+    @staticmethod
+    def _state(order: Any) -> OrderState:
+        raw = getattr(order.status, "value", order.status)
+        return OrderState(
+            status=STATUS_MAP.get(str(raw), "submitted"),
+            filled_qty=float(order.filled_qty or 0),
+            filled_avg_price=float(order.filled_avg_price) if order.filled_avg_price else None,
+            broker_order_id=str(order.id),
+        )
+
 
 class FakeBroker:
     """A stand-in for tests and FLEET_FAKE_BROKER=1 demos; never used with real keys.
@@ -152,6 +224,29 @@ class FakeBroker:
 
     def account(self) -> AccountInfo:
         return AccountInfo(self.equity, self.last_equity, self.equity, self.equity)
+
+    # Orders fill at once at `price_of(symbol)` with 5 bp (stocks) or 10 bp (crypto)
+    # slippage. price_of is set by the app (latest cached close) or by a test.
+    price_of: Any = None
+    refuse: str | None = None
+
+    def place_order(self, client_order_id: str, symbol: str, side: str, notional: float | None = None,
+                    qty: float | None = None) -> OrderState:
+        if not hasattr(self, "_orders"):
+            self._orders: dict[str, OrderState] = {}
+        if self.refuse:
+            state = OrderState("rejected", error=self.refuse)
+        else:
+            price = float(self.price_of(symbol)) if self.price_of else 100.0
+            slip = (0.0010 if "/" in symbol else 0.0005) * (1 if side == "buy" else -1)
+            fill = price * (1 + slip)
+            filled = (notional / fill) if notional is not None else float(qty or 0)
+            state = OrderState("filled", filled, fill, f"fake-{client_order_id[:8]}")
+        self._orders[client_order_id] = state
+        return state
+
+    def get_order(self, client_order_id: str) -> OrderState:
+        return getattr(self, "_orders", {}).get(client_order_id) or OrderState("rejected", error="unknown order")
 
 
 def choose_mode(config: Config, live_confirmed: bool) -> str:
@@ -185,6 +280,11 @@ class BrokerStatus:
         self.clock_info: ClockInfo | None = None
         self.account_info: AccountInfo | None = None
         self.error: str | None = broker.problem
+
+    def age(self) -> float:
+        """Seconds since the last refresh (infinite before the first)."""
+        with self._lock:
+            return float("inf") if self._at is None else self._mono() - self._at
 
     def refresh(self, force: bool = False) -> None:
         """Ask Alpaca again when the cache is older than ttl (or force)."""

@@ -123,6 +123,7 @@ def test_backtest_job_carries_model_and_limits_and_stores_result(client, conn):
     assert row["metrics"]["held_out"]["roi"] == 0.05
 
 
-def test_backtest_needs_a_model_and_paper_trade_is_not_ready(client):
+def test_backtest_needs_a_model_and_paper_trade_needs_a_backtest_first(client):
     assert client.post("/api/jobs", json={"kind": "backtest"}).status_code == 400
-    assert client.post("/api/jobs", json={"kind": "paper_trade", "model_id": "momentum"}).status_code == 400
+    resp = client.post("/api/jobs", json={"kind": "paper_trade", "model_id": "momentum"})
+    assert resp.status_code == 409 and "backtest first" in resp.json()["detail"]

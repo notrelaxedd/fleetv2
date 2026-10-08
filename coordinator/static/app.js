@@ -58,10 +58,19 @@
     });
   }
 
+  // The Fleet screen refreshes /fragments/fleet; the Models screen refreshes /fragments/models for the
+  // model that is selected on the page (so the selection stays put even when the ranking moves).
+  function fragmentUrl() {
+    var screen = $("[data-models-screen]");
+    if (!screen) { return "/fragments/fleet"; }
+    var id = screen.getAttribute("data-selected-id");
+    return "/fragments/models" + (id ? "?id=" + encodeURIComponent(id) : "");
+  }
+
   function refresh() {
     if (inflight) { return Promise.resolve(); }
     inflight = true;
-    return fetch("/fragments/fleet", { cache: "no-store" }).then(function (res) {
+    return fetch(fragmentUrl(), { cache: "no-store" }).then(function (res) {
       if (!res.ok) { throw new Error("status " + res.status); }
       return res.text();
     }).then(function (html) {
@@ -106,6 +115,38 @@
     });
   }
 
+  // ---- Models screen: search, backtest and paper-trading buttons
+  function reply(which, text, ok) {
+    var line = $('[data-reply="' + which + '"]');
+    if (!line) { return; }
+    line.textContent = text;
+    line.dataset.tone = ok ? "ok" : "error";
+  }
+
+  function plainMessage(r, fallback) {
+    return typeof r.message === "string" && r.message ? r.message : (r.ok ? fallback : "Something went wrong");
+  }
+
+  function modelsAction(button, action) {
+    var id = button.dataset.modelId;
+    var url, body, which = "model", done = "Done";
+    if (action === "search-start" || action === "search-stop") {
+      url = "/api/search/" + (action === "search-start" ? "start" : "stop");
+      which = "search";
+    } else if (action === "run-backtest") {
+      url = "/api/jobs";
+      body = { kind: "backtest", model_id: id, target: "auto" };
+    } else {
+      url = "/api/models/" + encodeURIComponent(id) + "/paper/" + (action === "paper-start" ? "start" : "stop");
+    }
+    button.disabled = true;
+    send(url, body).then(function (r) {
+      reply(which, plainMessage(r, done), r.ok);
+      button.disabled = false;
+      return refresh();
+    });
+  }
+
   // ---- buttons (delegated, so they keep working after a region is swapped)
   document.addEventListener("click", function (e) {
     var button = e.target.closest("button[data-action]");
@@ -119,6 +160,8 @@
         if (!r.ok) { toast(r.message, false); }
         return refresh();
       });
+    } else if (/^(search-(start|stop)|run-backtest|paper-(start|stop))$/.test(action)) {
+      modelsAction(button, action);
     } else if (action === "run-again") {
       button.disabled = true;
       send("/api/jobs/" + encodeURIComponent(button.dataset.jobId) + "/run-again").then(function (r) {

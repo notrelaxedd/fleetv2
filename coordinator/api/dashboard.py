@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
 import psycopg
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+from markupsafe import Markup
 
-from coordinator import fleet_view, web
+from coordinator import charts, fleet_view, models_view, search, trading_view, web
 from coordinator.api.deps import DB, require_owner
 
 router = APIRouter(dependencies=[Depends(require_owner)])
@@ -31,7 +33,25 @@ def fleet_fragment(request: Request, conn: psycopg.Connection = DB) -> HTMLRespo
     return web.render("fleet_fragment.html", page)
 
 
+def _models_context(request: Request, conn: psycopg.Connection) -> dict[str, Any]:
+    """The Models screen's data (selected model from ?id=), with the SVGs drawn."""
+    now = datetime.now(timezone.utc)
+    page = models_view.models_page(conn, request.query_params.get("id"), paper=trading_view.paper_summaries(conn),
+                                   search=search.search_status(conn))
+    for row in page["models"]:
+        row["spark_svg"] = Markup(charts.sparkline(row["spark"]))
+    selected = page["selected"]
+    if selected and selected.get("chart"):
+        selected["chart_svg"] = Markup(charts.chart_for(selected["chart"]))
+    return {**page, "header": fleet_view.header(conn, request.app.state.broker_status, now)}
+
+
 @router.get("/models", response_class=HTMLResponse)
 def models(request: Request, conn: psycopg.Connection = DB) -> HTMLResponse:
-    header = fleet_view.header(conn, request.app.state.broker_status, datetime.now(timezone.utc))
-    return web.render("models.html", {"current": "models", "header": header})
+    return web.render("models.html", {"current": "models", **_models_context(request, conn)})
+
+
+@router.get("/fragments/models", response_class=HTMLResponse)
+def models_fragment(request: Request, conn: psycopg.Connection = DB) -> HTMLResponse:
+    """The parts of the Models screen (and the header status) that app.js swaps every 5 seconds."""
+    return web.render("models_fragment.html", _models_context(request, conn))

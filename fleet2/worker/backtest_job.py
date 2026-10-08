@@ -61,7 +61,8 @@ def summary_line(result: dict[str, Any]) -> str:
 
 def signed_pct(fraction: float) -> str:
     """0.042 -> "+4.2%", -0.031 -> "−3.1%" (a real minus sign, never colour alone)."""
-    return ("+" if fraction >= 0 else "−") + f"{abs(fraction) * 100:.1f}%"
+    text = f"{abs(fraction) * 100:.1f}%"
+    return ("−" if fraction < 0 and text != "0.0%" else "+") + text
 
 
 def run_backtest_job(params: dict[str, Any], checkpoint: dict[str, Any] | None, emit: Any, should_stop: Any) -> dict[str, Any]:

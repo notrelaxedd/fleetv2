@@ -182,9 +182,9 @@ def test_assign_panel_dropdowns(client, conn):
     html = client.get("/fleet").text
     kind = html[html.index('data-field="kind"'):html.index('data-field="model"')]
     options = re.findall(r"<option [^>]*>([^<]*)</option>", kind)
-    assert options == ["Backtest", "Paper trade (coming soon)",
-                       "Model search (coming soon)", "Data refresh"]  # stage 2: backtest and data refresh
-    assert kind.count("disabled") == 2
+    assert options == ["Backtest", "Paper trade",
+                       "Model search (coming soon)", "Data refresh"]  # stage 4: all but model search
+    assert kind.count("disabled") == 1
     assert "Test one model on past prices and save its results." in html
     model = html[html.index('data-field="model"'):html.index('data-field="worker"')]
     assert re.findall(r"<option [^>]*>([^<]*)</option>", model) == ["Crypto trend", "Dip buyer", "Momentum", "Pairs"]
@@ -215,16 +215,6 @@ def test_fragment_returns_the_refreshable_regions(client, conn):
     assert len(attr_tags(html, "data-tile")) == 4 and 'data-worker="' in html
     assert '<option value="auto">Auto — pick the least busy</option>' in html
     assert "<html" not in html and "Assign a job" not in html  # the panel itself is never swapped
-
-
-def test_models_placeholder_has_the_same_header(client):
-    html = client.get("/models").text
-    assert element(html, 'data-placeholder="models"') == "The Models screen arrives in stage 3."
-    assert 'data-nav="models" class="current" aria-current="page"' in html
-    assert element(html, 'data-pill="crypto"') == "Crypto 24/7"
-    assert element(html, 'data-action="pause"') == "Pause all trading"
-    client.post("/api/trading/pause")
-    assert f"<p>{BANNER}</p>" in client.get("/models").text
 
 
 def test_static_files_are_served(client):

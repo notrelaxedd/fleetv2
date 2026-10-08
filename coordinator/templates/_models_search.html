@@ -1,0 +1,2 @@
+<button type="button" class="btn solid wide" data-action="{{ 'search-stop' if search.running else 'search-start' }}" data-running="{{ 'true' if search.running else 'false' }}">{{ search.button }}</button>
+{% if search.detail %}<p class="muted small" data-search-detail>{{ search.detail }}</p>{% endif %}

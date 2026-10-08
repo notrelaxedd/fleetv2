@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from coordinator import db, web
-from coordinator.api import dashboard, data, dl, jobs, models, owner, workers
+from coordinator.api import dashboard, data, dl, jobs, models, owner, trading, workers
 from coordinator.broker import BrokerStatus, make_broker
 from coordinator.bundle import build_bundle
 from coordinator.config import Config
@@ -169,6 +169,8 @@ def create_app(config: Config, broker_status: BrokerStatus | None = None) -> Fas
     app.include_router(owner.router)
     app.include_router(models.worker_router)
     app.include_router(models.owner_router)
+    app.include_router(trading.worker_router)
+    app.include_router(trading.owner_router)
     app.include_router(owner.health_router)
     app.include_router(dl.router)
     app.include_router(dashboard.router)

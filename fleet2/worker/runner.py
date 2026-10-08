@@ -73,6 +73,7 @@ def _params_with_context(job: dict[str, Any]) -> dict[str, Any]:
     params = dict(job.get("params") or {})
     if isinstance(job.get("context"), dict):
         params["_context"] = job["context"]
+    params["_job_id"] = job.get("id")
     return params
 
 

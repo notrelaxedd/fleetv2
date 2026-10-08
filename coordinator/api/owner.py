@@ -57,6 +57,11 @@ def create_job(body: JobBody, request: Request, conn: psycopg.Connection = DB) -
         raise BadRequest("Pick a model for this job")
     if body.kind not in fleet_view.NEEDS_MODEL:
         body.model_id = None
+    if body.kind == "paper_trade":
+        from coordinator.api.trading import StartBody, start_paper_trading
+
+        return jsonable(start_paper_trading(conn, request, body.model_id, StartBody(target=body.target,
+                                                                                     confirm=body.params.get("confirm"))))
     params = models.job_params(conn, body.kind, body.model_id, body.params, request.app.state.limits)
     result = queue.create_job(conn, body.kind, params, body.target, body.model_id, body.idempotency_key)
     names = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM workers").fetchall()}
