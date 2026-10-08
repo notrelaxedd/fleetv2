@@ -57,6 +57,10 @@ def create_job(body: JobBody, request: Request, conn: psycopg.Connection = DB) -
         raise BadRequest("Pick a model for this job")
     if body.kind not in fleet_view.NEEDS_MODEL:
         body.model_id = None
+    if body.kind == "model_search":
+        from coordinator import search
+
+        return jsonable(search.start(conn, request.app.state.limits, body.params.get("markets"), body.target))
     if body.kind == "paper_trade":
         from coordinator.api.trading import StartBody, start_paper_trading
 

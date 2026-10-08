@@ -47,13 +47,15 @@ def fetch_if_changed(host_url: str, token: str, market: str, etag: str | None) -
     return json.loads(gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw), new_etag
 
 
-def decision(data: MarketData, module: Any, params: dict[str, Any]) -> tuple[int, dict[str, float]] | None:
+def decision(data: MarketData, module: Any, params: dict[str, Any], first: bool = False) -> tuple[int, dict[str, float]] | None:
     """(decision bar index, weights) when the next bar is a decision bar, else None.
     The next bar to open is index n_bars; the backtester decides at bars where
-    (index - start) % every == 0, here anchored at index 0 of the cached history."""
+    (index - start) % every == 0, here anchored at index 0 of the cached history. The
+    very first decision of a job is made at once (as a backtest decides at its first
+    bar), so a newly started model does not sit in cash until its next turn."""
     n = data.n_bars
     every = max(1, int(module.rebalance_every(params)))
-    if n < module.warmup(params) or n % every != 0:
+    if n < module.warmup(params) or (n % every != 0 and not first):
         return None
     return n, clean_targets(module.target_positions(History(data, n), params), module.SYMBOLS)
 
@@ -87,7 +89,7 @@ def run_paper_trade(params: dict[str, Any], checkpoint: dict[str, Any] | None, e
                     data = from_payload(payload)
                 if data is not None:
                     last_t = int(data.times[-1])
-                    picked = decision(data, module, model_params)
+                    picked = decision(data, module, model_params, first=sent_bar == 0)
                     if picked is None:
                         status = f"Prices through {_when(last_t)}; not this model's turn to decide"
                     elif last_t > sent_bar:

@@ -42,6 +42,8 @@ REGISTER_BACKOFF = (1, 2, 4, 8, 16, 30)
 UPDATE_RETRY_SECONDS = 60.0
 SHUTDOWN_FLUSH_ATTEMPTS = 3
 SHUTDOWN_FLUSH_DELAY = 1.0
+# Jobs with no end: handed back (and taken again after the restart) for a self-update.
+ENDLESS_KINDS = ("paper_trade", "model_search")
 
 
 @dataclass
@@ -620,7 +622,16 @@ class Agent:
     def _maybe_self_update(self) -> None:
         if not self.host_code_version or self.host_code_version == self.code_version:
             return
-        if self.running or self.pending_posts or self.pending_releases:
+        if self.pending_posts or self.pending_releases:
+            return
+        if self.running and all(rj.job.get("kind") in ENDLESS_KINDS for rj in self.running.values()):
+            log.warning("handing back %d endless job(s) to update to %s", len(self.running), self.host_code_version)
+            for rj in self._stop_runners(list(self.running), self.options.drain_grace):
+                entry = self._release_entry(rj, "update")
+                if not self._release_now(entry):
+                    self.pending_releases.append(entry)
+                    return
+        if self.running:
             return
         now = self._clock()
         if self._update_failed_at is not None and now - self._update_failed_at < UPDATE_RETRY_SECONDS:

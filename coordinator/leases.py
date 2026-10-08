@@ -22,7 +22,7 @@ from coordinator.events import add_job_event
 from coordinator.settings import get_int_setting
 
 ACTIVE = ("leased", "cancel_requested")
-RELEASE_REASONS = ("preempt", "cancel", "oom", "shutdown", "stopped")
+RELEASE_REASONS = ("preempt", "cancel", "oom", "shutdown", "stopped", "update")
 RELEASE_ERRORS = {
     "oom": "Stopped: the job used too much memory on {worker}",
     "shutdown": "Stopped: the agent on {worker} was shut down",
@@ -186,6 +186,22 @@ def release(
     if job is None:
         return None
     cancelled = job["status"] == "cancel_requested" or reason == "cancel"
+    if reason == "update" and not cancelled:
+        # An endless job (paper trading, model search) handed back so its worker can
+        # update itself: queued again for the same worker, which takes it back from
+        # its checkpoint a few seconds later.
+        conn.execute(
+            """
+            UPDATE jobs SET status = 'queued', target_worker_id = lease_worker_id, target_auto = false,
+                   progress = COALESCE(%s, progress), checkpoint = COALESCE(%s, checkpoint),
+                   lease_worker_id = NULL, lease_token = NULL, lease_expires_at = NULL,
+                   preempt_requested = false, updated_at = now()
+             WHERE id = %s
+            """,
+            (progress, Jsonb(checkpoint) if checkpoint is not None else None, jid),
+        )
+        add_job_event(conn, jid, "released", worker_id, {"status": "queued", "reason": "update"})
+        return "queued"
     status = "cancelled" if cancelled else "failed"
     error = None if cancelled else RELEASE_ERRORS[reason].format(worker=_worker_name(conn, job["lease_worker_id"]))
     conn.execute(

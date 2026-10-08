@@ -183,8 +183,8 @@ def test_assign_panel_dropdowns(client, conn):
     kind = html[html.index('data-field="kind"'):html.index('data-field="model"')]
     options = re.findall(r"<option [^>]*>([^<]*)</option>", kind)
     assert options == ["Backtest", "Paper trade",
-                       "Model search (coming soon)", "Data refresh"]  # stage 4: all but model search
-    assert kind.count("disabled") == 1
+                       "Model search", "Data refresh"]  # every job type is available
+    assert kind.count("disabled") == 0
     assert "Test one model on past prices and save its results." in html
     model = html[html.index('data-field="model"'):html.index('data-field="worker"')]
     assert re.findall(r"<option [^>]*>([^<]*)</option>", model) == ["Crypto trend", "Dip buyer", "Momentum", "Pairs"]

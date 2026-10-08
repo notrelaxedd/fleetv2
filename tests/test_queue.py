@@ -127,3 +127,16 @@ def test_backtest_needs_a_model_and_paper_trade_needs_a_backtest_first(client):
     assert client.post("/api/jobs", json={"kind": "backtest"}).status_code == 400
     resp = client.post("/api/jobs", json={"kind": "paper_trade", "model_id": "momentum"})
     assert resp.status_code == 409 and "backtest first" in resp.json()["detail"]
+
+
+def test_an_endless_job_handed_back_for_an_update_waits_for_the_same_worker(client, conn):
+    w = enroll(client, conn, "w12")
+    heartbeat(client, w)
+    client.post("/api/jobs", json={"kind": "sleep", "target": "auto"})
+    job = heartbeat(client, w, want_job=True)["claimed"][0]
+    heartbeat(client, w, released=[{"id": job["id"], "lease_token": job["lease_token"], "reason": "update",
+                                    "checkpoint": {"sent_bar_t": 5}}])
+    row = conn.execute("SELECT status, target_worker_id, checkpoint FROM jobs WHERE id = %s", (job["id"],)).fetchone()
+    assert row == {"status": "queued", "target_worker_id": w["worker_id"], "checkpoint": {"sent_bar_t": 5}}
+    again = heartbeat(client, w, want_job=True)["claimed"][0]
+    assert again["id"] == job["id"] and again["checkpoint"] == {"sent_bar_t": 5}

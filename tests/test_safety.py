@@ -288,3 +288,22 @@ def test_a_paper_book_never_trades_when_the_coordinator_is_live(client, conn):
 
 def test_broker_is_fake_only_when_asked():
     assert isinstance(FakeBroker(), FakeBroker)
+
+
+def test_a_paper_job_on_a_dead_worker_runs_again_on_the_same_book(client, conn):
+    from coordinator import queue
+
+    seed_prices(conn, {"AAPL": 100.0})
+    w, job = paper_model(client, conn)
+    conn.execute("UPDATE jobs SET lease_expires_at = now() - interval '1 second' WHERE id = %s", (job["id"],))
+    queue.reap(conn)
+    prev = client.get("/api/fleet").json()["previous_jobs"][0]
+    assert prev["status"] == "Failed" and prev["can_run_again"]
+    again = client.post(f"/api/jobs/{job['id']}/run-again")
+    assert again.status_code == 201
+    book = trading.open_book(conn, "momentum")
+    assert str(book["job_id"]) == again.json()["jobs"][0]["id"]
+    client.post("/api/models/momentum/paper/stop")
+    stopped = conn.execute("SELECT id FROM jobs WHERE id = %s", (again.json()["jobs"][0]["id"],)).fetchone()
+    row = next(j for j in client.get("/api/fleet").json()["previous_jobs"] if j["id"] == str(stopped["id"]))
+    assert row["status"] == "Cancelled" and not row["can_run_again"]

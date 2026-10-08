@@ -9,6 +9,7 @@ a job at a worker no longer flips the worker's role. Targets:
 """
 from __future__ import annotations
 
+import secrets
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -169,13 +170,40 @@ def cancel_job(conn: psycopg.Connection, job_id: Any) -> dict[str, Any]:
     raise Conflict(f"job is {status}")
 
 
+ENDLESS = ("paper_trade", "model_search")
+
+
+def can_run_again(job: dict[str, Any]) -> bool:
+    """Failed jobs can run again; cancelled ones too, except paper trading and model
+    search, which are stopped on purpose (start them again from the Models screen)."""
+    return job["status"] == "failed" or (job["status"] == "cancelled" and job["kind"] not in ENDLESS)
+
+
 def run_again(conn: psycopg.Connection, job_id: Any) -> CreateResult:
     """A failed or cancelled job as a new queued job with the same kind, params and
-    model, sent to the least busy worker (its old worker may still be offline)."""
+    model, sent to the least busy worker (its old worker may still be offline).
+    A paper trade job picks up its model's open book again; a model search gets a new
+    seed so it does not repeat the settings it already tried."""
     job = get_job(conn, job_id)
-    if job["status"] not in ("failed", "cancelled"):
-        raise Conflict("only a failed or cancelled job can be run again")
-    return create_job(conn, job["kind"], dict(job["params"] or {}), AUTO, job["model_id"], retry_of=job["id"])
+    if not can_run_again(job):
+        raise Conflict("this job cannot be run again; start it from the Models screen")
+    params = dict(job["params"] or {})
+    if job["kind"] == "model_search":
+        if conn.execute("SELECT 1 FROM jobs WHERE kind = 'model_search' AND status IN ('queued','leased','cancel_requested')").fetchone():
+            raise Conflict("Model search is already running")
+        params["seed"] = secrets.randbelow(10**9)
+    if job["kind"] == "paper_trade":
+        book = conn.execute("SELECT id FROM books WHERE model_id = %s AND status = 'active'", (job["model_id"],)).fetchone()
+        if book is None:
+            raise Conflict("This model is not paper trading any more; start it from the Models screen")
+        busy = conn.execute("SELECT 1 FROM jobs WHERE kind = 'paper_trade' AND model_id = %s AND status IN ('queued','leased')",
+                            (job["model_id"],)).fetchone()
+        if busy:
+            raise Conflict("A worker is already running this model")
+        result = create_job(conn, job["kind"], params, AUTO, job["model_id"], retry_of=job["id"])
+        conn.execute("UPDATE books SET job_id = %s WHERE id = %s", (result.jobs[0]["id"], book["id"]))
+        return result
+    return create_job(conn, job["kind"], params, AUTO, job["model_id"], retry_of=job["id"])
 
 
 def dispatch(conn: psycopg.Connection) -> list[dict[str, Any]]:

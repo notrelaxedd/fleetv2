@@ -6,9 +6,8 @@ under 3 s, so a stop is always quick) and raises JobStopped when should_stop() t
 true between units. progress is 0..1, or None for a job with no end (paper trading
 shows "Live"). detail is the one line the Fleet card shows under the task name.
 
-Stage 1 ships only `sleep`, the test job used to watch progress move on the Fleet
-screen. Stage 2 adds data_refresh and backtest, stage 4 paper_trade, stage 5
-model_search.
+Kinds: sleep (a test job for watching progress on the Fleet screen), data_refresh,
+backtest, paper_trade and model_search.
 """
 
 from __future__ import annotations
@@ -62,9 +61,16 @@ def run_paper_trade(params: dict[str, Any], checkpoint: dict[str, Any] | None, e
     return run(params, checkpoint, emit, should_stop)
 
 
+def run_model_search(params: dict[str, Any], checkpoint: dict[str, Any] | None, emit: Emit, should_stop: ShouldStop) -> Any:
+    from fleet2.worker.search_job import run_search
+
+    return run_search(params, checkpoint, emit, should_stop)
+
+
 JOBS: dict[str, JobFunc] = {
     "sleep": run_sleep,
     "data_refresh": run_data_refresh,
     "backtest": run_backtest,
     "paper_trade": run_paper_trade,
+    "model_search": run_model_search,
 }

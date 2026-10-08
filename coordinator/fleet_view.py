@@ -15,6 +15,7 @@ import psycopg
 from coordinator.broker import LIVE, BrokerStatus
 from coordinator.limits import Limits
 from coordinator.models import list_models
+from coordinator.scheduling import can_run_again
 from coordinator.settings import get_int_setting, get_setting
 
 TZ = ZoneInfo("America/New_York")
@@ -33,7 +34,7 @@ JOB_CHOICES = (
 )
 NEEDS_MODEL = ("backtest", "paper_trade")
 # Job kinds the workers can run in this build; the others are listed but not offered yet.
-AVAILABLE_KINDS: tuple[str, ...] = ("sleep", "data_refresh", "backtest", "paper_trade")
+AVAILABLE_KINDS: tuple[str, ...] = ("sleep", "data_refresh", "backtest", "paper_trade", "model_search")
 PAUSED_BANNER = "All trading is paused. No model will place orders until you resume. Backtests keep running."
 
 
@@ -286,7 +287,7 @@ def previous_jobs(conn: psycopg.Connection, now: datetime, limit: int = 50) -> l
             "result": _result_text(r),
             "status": status,
             "state": r["status"],
-            "can_run_again": r["status"] in ("failed", "cancelled"),
+            "can_run_again": can_run_again(r),
         })
     return out
 

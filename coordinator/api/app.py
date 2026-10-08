@@ -169,6 +169,7 @@ def create_app(config: Config, broker_status: BrokerStatus | None = None) -> Fas
     app.include_router(owner.router)
     app.include_router(models.worker_router)
     app.include_router(models.owner_router)
+    app.include_router(models.search_router)
     app.include_router(trading.worker_router)
     app.include_router(trading.owner_router)
     app.include_router(owner.health_router)
