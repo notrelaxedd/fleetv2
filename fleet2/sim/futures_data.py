@@ -192,11 +192,19 @@ class PriceCache:
         self.requested: list[str] = []
 
     def get(self, through: str, job_id: str | None = None) -> FuturesData:
-        etag, data = self._kept.get(through, (None, None))
         url = f"{self.host}/api/v1/data/futures-bars?through={through}"
         if job_id:
             url += f"&job_id={job_id}"
         self.requested.append(through)
+        return self._fetch(through, url)
+
+    def live(self, source: str) -> FuturesData:
+        """The latest weeks of 1-minute prices from a live source (live trading)."""
+        self.requested.append(f"live:{source}")
+        return self._fetch(f"live:{source}", f"{self.host}/api/v1/data/futures-live?source={source}")
+
+    def _fetch(self, key: str, url: str) -> FuturesData:
+        etag, data = self._kept.get(key, (None, None))
         headers = {"Authorization": "Bearer " + self.token}
         if etag and data is not None:
             headers["If-None-Match"] = etag
@@ -213,7 +221,7 @@ class PriceCache:
             raise http.HttpConnectionError(str(exc)) from None
         data = from_npz(raw)
         self.downloads += 1
-        self._kept[through] = (new_etag, data)
+        self._kept[key] = (new_etag, data)
         return data
 
 

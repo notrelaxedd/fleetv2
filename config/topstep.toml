@@ -1,11 +1,12 @@
 # fleet-v2 futures settings: Topstep's rules for the research simulator, plus the
 # futures price download cap. Edit on box1, then `docker compose restart coordinator`.
 #
-# NOTHING HERE IS A GUESS, AND NOTHING HERE IS CHECKED YET.
+# NOTHING HERE IS A GUESS.
 # Every Topstep value below comes from the table in docs/DAYTRADING_PLAN.md, which was
-# written from third-party summaries of Topstep's rules in October 2026. Topstep changed
-# these rules several times in 2025 and 2026. Check every value at help.topstep.com and
-# write the date you checked it in its "Last checked" line.
+# written from third-party summaries of Topstep's rules in October 2026, and you
+# confirmed them on Oct 8, 2026. Topstep changed these rules several times in 2025 and
+# 2026: check them again at help.topstep.com now and then, and update the "Last checked"
+# lines.
 #
 # Values the plan does not give are left unset (commented out). Wherever one is needed,
 # the dashboard says "Set the fee in config/topstep.toml" (or names the value) instead
@@ -20,12 +21,12 @@ max_download_usd = 10.0
 [account]
 # The 50K Combine (the plan recommends the 50K account: the cheapest test).
 # Source: plan table, third-party summaries, October 2026. Check at help.topstep.com.
-# Last checked: not yet.
+# Last checked: confirmed by you on Oct 8, 2026.
 size = 50000
 
 # Profit target: the Combine passes once the balance is this much above the start.
 # Source: plan table ($3,000), third-party summaries, October 2026. Check at help.topstep.com.
-# Last checked: not yet.
+# Last checked: confirmed by you on Oct 8, 2026.
 profit_target = 3000
 
 # Maximum Loss Limit: the account fails when its balance, open trades included, falls to
@@ -34,25 +35,25 @@ profit_target = 3000
 # starting balance.
 # Source: plan table ($2,000, trails the end-of-day high, enforced live, stops at the
 # starting balance), third-party summaries, October 2026. Check at help.topstep.com.
-# Last checked: not yet.
+# Last checked: confirmed by you on Oct 8, 2026.
 max_loss_limit = 2000
 
 # Daily loss limit: none (0). The plan's table says it is an optional add-on. With a
 # number here, a day that falls that far is closed at that loss and trading stops for
 # the day (the account carries on).
 # Source: plan table, third-party summaries, October 2026. Check at help.topstep.com.
-# Last checked: not yet.
+# Last checked: confirmed by you on Oct 8, 2026.
 daily_loss_limit = 0
 
 # Most contracts at once: 5 minis or 50 micros. The simulator never tests more micros.
 # Source: plan table, third-party summaries, October 2026. Check at help.topstep.com.
-# Last checked: not yet.
+# Last checked: confirmed by you on Oct 8, 2026.
 max_micro_contracts = 50
 
 # Every position must be closed by this time, Chicago time. The backtester closes
 # everything at 15:00, before it.
 # Source: plan table (3:10 PM CT), third-party summaries, October 2026. Check at help.topstep.com.
-# Last checked: not yet.
+# Last checked: confirmed by you on Oct 8, 2026.
 flat_by = "15:10"
 
 [consistency]
@@ -63,7 +64,7 @@ flat_by = "15:10"
 # Sources disagree: one says 50% of the target, another 55% of total profit. Both
 # kinds work; set the one Topstep uses now.
 # Source: plan table, third-party summaries, October 2026. Check at help.topstep.com.
-# Last checked: not yet.
+# Last checked: confirmed by you on Oct 8, 2026.
 kind = "target"
 best_day_share = 0.50
 
@@ -72,13 +73,13 @@ best_day_share = 0.50
 # many winning days of at least payout_min_day_profit dollars of net profit each, counted
 # since the start or the last payout.
 # Source: plan table (5 days of $150+ net profit), third-party summaries, October 2026.
-# Check at help.topstep.com. Last checked: not yet.
+# Check at help.topstep.com. Last checked: confirmed by you on Oct 8, 2026.
 payout_winning_days = 5
 payout_min_day_profit = 150
 
 # A payout is at most this share of the profit in the account...
 # Source: plan table (up to 50% of balance), third-party summaries, October 2026.
-# Check at help.topstep.com. Last checked: not yet.
+# Check at help.topstep.com. Last checked: confirmed by you on Oct 8, 2026.
 payout_share_of_balance = 0.50
 
 # ...and at most this many dollars. The plan says payouts are "capped by account size
@@ -89,13 +90,13 @@ payout_share_of_balance = 0.50
 
 # Your share of each payout.
 # Source: plan table (90/10), third-party summaries, October 2026. Check at help.topstep.com.
-# Last checked: not yet.
+# Last checked: confirmed by you on Oct 8, 2026.
 profit_split = 0.90
 
 # After a payout the loss floor moves up to the starting balance (true), so the account
 # fails if it ever falls back to where it started.
 # Source: plan table, third-party summaries, October 2026. Check at help.topstep.com.
-# Last checked: not yet.
+# Last checked: confirmed by you on Oct 8, 2026.
 floor_to_start_after_payout = true
 
 [fees]
@@ -143,5 +144,24 @@ sizing_share = 0.5
 min_pass_rate_edge = 0.10
 # Lockbox: the pass rate may fall at most this much below the held-out one.
 max_lockbox_drop = 0.15
-# Shadow trading on live prices (stage 6, not built yet): at least this many days.
+# Alpaca paper trading on live prices: at least this many trading days...
 min_shadow_days = 20
+# ...with at most this share of days outside the held-out backtest's range of daily
+# results (its 1st to 99th percentile, scaled to the contracts traded), and a profit.
+max_days_outside = 0.10
+
+[live]
+# Trading a ready model on Topstep through TopstepX.
+# The balance your Topstep account started with, as TopstepX shows it on day one (the
+# loss floor is counted from it). Combine accounts start at the account size; set this
+# if an Express Funded account shows a different starting number.
+account_start_balance = 50000
+# Stop trading on Topstep once this share of the loss limit is used up (Topstep safety
+# rule from the plan: stop at 80%). Our own safety margin, not Topstep's rule.
+stop_at_loss_share = 0.80
+# Everything is closed this many minutes before 15:00 Chicago time, and no new trade is
+# opened in the 10 minutes before that.
+flat_margin_minutes = 2
+# The coordinator closes a model's positions when its worker has sent no decision for
+# this many seconds during the session (a worker that died must not leave a trade open).
+stale_decision_seconds = 180

@@ -12,6 +12,7 @@
       <div data-region="models-search">{% include parts.search %}</div>
       <p class="confirm" data-reply="search" role="status" aria-live="polite"></p>
     </div>
+    {% if view == "futures" %}<div class="msearch" data-region="topstep">{% include "_futures_topstep.html" %}</div>{% endif %}
     <div data-region="models-list">{% include parts.list %}</div>
   </section>
 

@@ -86,10 +86,10 @@ def test_futures_models_stay_out_of_the_stock_and_crypto_view(client, conn):
     assert "Opening range" not in fleet  # not offered for paper trading in the Assign panel
 
 
-def test_futures_models_never_paper_trade(client, conn):
+def test_futures_models_never_use_the_stock_books(client, conn):
     store(conn, "gap_fade", real_metrics())
     r = client.post("/api/models/gap_fade/paper/start", json={})
-    assert r.status_code == 409 and "research only" in r.json()["detail"]
+    assert r.status_code == 409 and "Futures view" in r.json()["detail"]
     assert conn.execute("SELECT count(*) AS n FROM books").fetchone()["n"] == 0
 
 
@@ -105,7 +105,7 @@ def test_the_futures_view_lists_the_five_starters_and_asks_for_the_fees(client, 
     assert element(html, "data-futures-prices") == "No futures prices yet: run a Futures prices job"
     assert element(html, 'data-action="futures-prices"') == "Load futures prices"
     assert "Not tested yet" in element(html, "data-untested")
-    assert "never place orders" in element(html, "data-paper-note")
+    assert "first paper trades on Alpaca" in element(html, "data-paper-note")
     assert "paper-start" not in html
 
 

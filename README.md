@@ -44,11 +44,12 @@ says "Add your Alpaca paper keys to .env on box1".
 Stock prices come from `ALPACA_DATA_FEED=iex`, Alpaca's free feed. `sip` is Alpaca's paid
 feed: set it only with the owner's OK.
 
-## Futures prices (for Topstep research)
+## Futures prices (for Topstep)
 
-The Futures market is research only: it backtests and searches for day-trading models
-on the CME micro futures MES (micro S&P 500) and MNQ (micro Nasdaq-100), and never
-places an order. It uses 1-minute bars of the regular session only, 8:30 to 15:00
+The Futures market backtests and searches for day-trading models on the CME micro
+futures MES (micro S&P 500) and MNQ (micro Nasdaq-100), paper trades them on Alpaca, and
+trades the ones ready for a Combine on Topstep (see "Futures trading: Alpaca paper, then
+Topstep"). Research uses 1-minute bars of the regular session only, 8:30 to 15:00
 Chicago time (to 12:00 on half days), from May 2019.
 
 Where the prices come from:
@@ -238,8 +239,74 @@ contract size the held-out test chose, and its result is kept forever (the datab
 refuses to change or delete it). It needs real Databento prices, so the lockbox is never
 spent on stand-in prices.
 
-Futures models never place orders. There is no paper trading, shadow trading or
-Topstep connection in this build; starting paper trading on a futures model is refused.
+## Futures trading: Alpaca paper, then Topstep
+
+A futures model goes to Topstep only after it has traded on live prices in the Alpaca
+paper account. Both are started from its page on the Futures view.
+
+**Start paper trading on Alpaca** (any tested futures model, once the commissions are set
+in `config/topstep.toml`). Alpaca has no futures, so each micro contract is traded as its
+share equivalent in the paper account, long or short:
+
+- 1 MES = 50 SPY shares (the S&P 500 is about 10 x SPY and MES pays $5 a point), about
+  $33,000;
+- 1 MNQ = 82 QQQ shares (the Nasdaq-100 is about 41 x QQQ and MNQ pays $2 a point).
+
+A one-dollar move in SPY on 50 shares is then the same $50 as the matching move on one
+MES contract, so the results read in futures dollars. The model decides on SPY and QQQ
+1-minute prices from Alpaca, scaled to index points, exactly as in its proxy backtests.
+It is never traded with real money: in live mode the coordinator refuses.
+
+How it runs: a worker replays today through the backtester every few seconds, on the
+newest closed minute, and sends the coordinator the contracts the model wants from the
+next minute on (after its stop, target and the cut-off, the same logic the backtest
+used). The coordinator places the orders and books the fills. Each day's result counts
+the commission per contract, though Alpaca paper charges none, so it compares with the
+backtest. The model's page shows what it holds, today's result, every day so far and
+its live signal. `GET /api/models/<id>/futures/orders` lists its orders.
+
+Its own limits, in `config/limits.toml` `[futures]`: at most 2 micro contracts per model
+(`futures_paper_max_contracts`) and $150,000 of SPY and QQQ for all futures paper models
+together (`futures_paper_max_dollars`). The Alpaca account's 2% daily loss limit and the
+pause switch apply as for stocks.
+
+**Start trading on Topstep** is only offered for a model whose whole "ready for a Combine"
+checklist is ticked, including 20 Alpaca paper days. To connect TopstepX (a separate
+paid API subscription at Topstep; make the key under Settings > API in TopstepX), put
+these in `.env` on box1:
+
+```
+TOPSTEPX_USERNAME=...
+TOPSTEPX_API_KEY=...
+TOPSTEPX_ACCOUNT=...      # the account name (or id) to trade, e.g. your Combine
+```
+
+Then type **TRADE ON TOPSTEP** in the Topstep box on the Futures view and run
+`docker compose restart coordinator`. Topstep stays off until all of that is done, and
+never switches on by itself. On Topstep the model decides on the real contract's
+1-minute prices from TopstepX and trades real micro contracts at its best contract size.
+
+**Trading by hand instead:** the Futures view lists every trading model's live signal
+(for example "long 1 MES"). You can follow it on TopstepX yourself rather than connecting
+the API.
+
+Safety rules for futures, checked on every order:
+
+- **Flat every day**: no new trade in the 10 minutes before the flat time, and
+  everything closed 2 minutes before 15:00 Chicago time (`flat_margin_minutes`, ahead of
+  Topstep's 15:10 deadline). Closing for the day still happens while trading is paused,
+  so an account is never left holding overnight.
+- **A worker that stops sending decisions** (crashed, offline) gets its model closed out
+  after 180 seconds (`stale_decision_seconds`).
+- **Topstep's loss limit**: the coordinator counts the loss floor from the account's
+  balance at the end of each day (`[live] account_start_balance`, the same rule as the
+  simulator) and stops trading on Topstep, closing every position, once 80% of the loss
+  limit is used (`stop_at_loss_share`). Only you resume it ("Resume Topstep trading").
+  Open losses count toward it; open gains do not.
+- **Topstep's contract limit**: no model above its own size, and never more than
+  `max_micro_contracts` (50) on the account in total.
+- **Every order is logged**, blocked ones too, with the model, the worker, the time and
+  the reason.
 
 ### What "ready for a Combine" requires
 
@@ -252,10 +319,13 @@ A model is shown as ready for a Combine only when every line of its checklist is
 4. **Held-out**: it makes money at double slippage.
 5. **Lockbox Final check**: it makes money, and its pass rate is at most 15 points below
    the held-out one (`max_lockbox_drop`).
-6. **Shadow trading**: at least 20 trading days on live prices, inside the range the
-   backtest predicted. This is not built yet (it comes later, only with your OK), so
-   **no model shows as ready in this build**. Expect most searches to end with "nothing
-   good enough yet"; that answer is worth having before paying for a Combine.
+6. **Alpaca paper trading**: at least 20 finished trading days on live prices
+   (`min_shadow_days`), with at most 10% of them (`max_days_outside`) outside the range
+   of daily results the held-out backtest saw (its 1st to 99th percentile, scaled to the
+   contracts traded), and a profit overall.
+
+Only then can it trade on Topstep. Expect most searches to end with "nothing good enough
+yet"; that answer is worth having before paying for a Combine.
 
 ## Topstep's rules (config/topstep.toml)
 
@@ -263,9 +333,10 @@ Futures models are judged on what Topstep pays for, not on ROI. A simulator
 (`fleet2/sim/topstep.py`) replays a model's days through Topstep's Combine (the paid
 test) and then the Express Funded account (where payouts happen), starting from every
 day of a period. Every rule it uses is in `config/topstep.toml`. The starting values
-come from third-party summaries in October 2026 and **none has been checked against
-Topstep yet**: check each one at help.topstep.com and write the date in its "Last
-checked" line. Edit the file, then `docker compose restart coordinator`.
+come from third-party summaries in October 2026; you confirmed them on Oct 8, 2026.
+Topstep changes its rules from time to time: check them at help.topstep.com now and then
+and update the "Last checked" lines. The fees and the payout cap are still to fill in.
+Edit the file, then `docker compose restart coordinator`.
 
 What each number means:
 
@@ -302,6 +373,9 @@ What each number means:
   MNQ, the Combine's monthly fee and the activation fee for the Express Funded account.
   Until you fill them in, futures backtests and model search do not start, and the
   dashboard says "Set the fee in config/topstep.toml" instead of a number.
+- **[live]**: the starting balance the loss floor is counted from, stopping at 80% of
+  the loss limit, the 2-minute margin before 15:00, and the 180 seconds after which a
+  silent worker's model is closed out (see "Futures trading").
 - **[costs] slippage_ticks** (1), **[simulator]** and **[ready]**: our own assumptions
   (slippage, how long to play the Express Funded account, how many coin-flip twins,
   and what "ready for a Combine" needs), not Topstep's rules.
@@ -338,6 +412,8 @@ What the simulator reports for a model, at each contract size it tries:
   including orders that were blocked and why. See a model's last 100 orders at
   `GET /api/models/<id>/orders` (open `https://box1.<tailnet>.ts.net/api/models/<id>/orders`
   in the browser).
+- **Futures models** have their own rules on top of these (flat every day, Topstep's loss
+  limit and contract limit): see "Futures trading: Alpaca paper, then Topstep".
 - **Market hours**: stock orders wait for the market to open (the model shows "Waiting
   for the stock market to open"). Crypto trades 24/7.
 - **Real money** needs all of these: `ALPACA_LIVE=true` and the live keys
@@ -403,7 +479,5 @@ Neither is switched on without the owner's OK. See `PLAN.md`.
 
 - **Paid data**: Alpaca's SIP feed (`ALPACA_DATA_FEED=sip`), with each bar set recording
   which feed it came from.
-- **Topstep funded futures**: the research side is built (see "Futures prices" and
-  "Futures on the Models screen"). Shadow trading on live futures prices and a Topstep
-  connection (TopstepX / ProjectX) are not: they are stage 6 of `docs/DAYTRADING_PLAN.md`
-  and need your OK, Topstep's terms and the API cost checked first.
+- **Topstep's overnight session**: futures models trade the regular session only
+  (8:30 to 15:00 Chicago time).

@@ -82,6 +82,7 @@ class FuturesRun:
     contracts: int
     feed: str
     trade_list: dict[str, np.ndarray] = field(default_factory=dict)
+    final: dict[str, int] | None = None  # open_end runs: contracts wanted from the next minute
 
     @property
     def n_trades(self) -> int:
@@ -226,13 +227,18 @@ class _Book:
 def run(data: FuturesData, module: ModuleType, params: dict[str, Any] | None, costs: FuturesCosts,
         contracts: int = 1, rules: DayRules = DayRules(), first_day: int = 0, last_day: int | None = None,
         flip_seed: int | None = None, should_stop: Callable[[], bool] | None = None,
-        targets: tuple[Bars, dict[str, np.ndarray]] | None = None) -> FuturesRun:
+        targets: tuple[Bars, dict[str, np.ndarray]] | None = None, open_end: bool = False) -> FuturesRun:
     """Trade days [first_day, last_day) of `data` with `contracts` contracts at full size.
 
     Days before first_day are history the model may look at, never traded; `data` should
     end where the period ends, so a later period is never even computed. `flip_seed`
     makes the coin-flip twin: the same entry times, each trade's direction decided by a
-    seeded coin. `targets` reuses an earlier model_targets() answer."""
+    seeded coin. `targets` reuses an earlier model_targets() answer.
+
+    open_end (live trading): `data` ends at the latest closed minute of a day still in
+    progress. That day is not closed out early, and run.final holds the contracts the
+    model wants from the next minute on, after its stop, target and the cut-off, exactly
+    as this backtest would trade them."""
     params = params_with_defaults(module, params)
     last_day = data.n_days if last_day is None else min(int(last_day), data.n_days)
     if not 0 <= first_day < last_day:
@@ -248,6 +254,9 @@ def run(data: FuturesData, module: ModuleType, params: dict[str, Any] | None, co
     real, unreal = np.zeros(n), np.zeros(n)
     per_day = {k: np.zeros(data.n_days) for k in ("trades", "minutes", "slippage", "fees")}
     trade_rows: list[tuple] = []
+    final: dict[str, int] = {}
+    last = data.n_days - 1
+    in_progress = open_end and data.n_days > 0 and int(data.day_end[last] - data.day_start[last]) < int(data.session[last])
     for symbol, target in wanted.items():
         if symbol not in data.symbols:
             continue
@@ -261,20 +270,29 @@ def run(data: FuturesData, module: ModuleType, params: dict[str, Any] | None, co
         fill_at = bars.end[change]
         day_of = bars.day[change]
         keep = (fill_at < data.day_end[day_of]) & (day_of >= first_day) & (day_of < last_day)
+        if in_progress:  # a closed decision bar whose fill is the next minute, not here yet
+            keep |= (day_of == last) & (fill_at == n) & bars.complete[change]
         change, fill_at, day_of = change[keep], fill_at[keep], day_of[keep]
+        final[symbol] = 0
         bounds = np.flatnonzero(np.r_[True, day_of[1:] != day_of[:-1]]) if day_of.size else np.zeros(0, dtype=int)
         for g, lo in enumerate(bounds):
             hi = bounds[g + 1] if g + 1 < len(bounds) else change.shape[0]
             d = int(day_of[lo])
-            last_minute = int(data.day_end[d]) - 1 - rules.flat_before_close
+            live = in_progress and d == last
+            closes_at = int(data.day_start[d] + data.session[d]) if live else int(data.day_end[d])
+            last_minute = closes_at - 1 - rules.flat_before_close
             cutoff = int(data.session[d]) - rules.cutoff_before_close
             model_sign = 0
             mult = 1
+            pending = None
             for i in range(lo, hi):
                 minute = int(fill_at[i])
                 if minute > last_minute:
                     break
                 book.watch(book.since, minute)
+                if live and minute == n:
+                    pending = i  # decided, not filled yet: worked out below
+                    break
                 q_model = int(want[change[i]])
                 sign = (q_model > 0) - (q_model < 0)
                 if coin is not None and sign != 0 and (sign != model_sign or book.pos == 0):
@@ -285,9 +303,22 @@ def run(data: FuturesData, module: ModuleType, params: dict[str, Any] | None, co
                     same_side = q != 0 and book.pos != 0 and (q > 0) == (book.pos > 0)
                     q = q if same_side and abs(q) < abs(book.pos) else 0 if not same_side else book.pos
                 book.move_to(minute, q, stop_ticks, target_ticks)
+            if live and n - 1 < last_minute:
+                book.watch(book.since, n)
+                q = book.pos
+                if pending is not None:
+                    q_model = int(want[change[pending]])
+                    q = q_model * (mult if coin is not None else 1)
+                    if int(data.minute[n - 1]) + 1 >= cutoff:
+                        same_side = q != 0 and book.pos != 0 and (q > 0) == (book.pos > 0)
+                        q = q if same_side and abs(q) < abs(book.pos) else 0 if not same_side else book.pos
+                final[symbol] = q
+                if book.pos != 0:  # still open: value it at the latest close, without closing it
+                    book._mark(book.since, n)
+                continue
             if book.pos != 0:
                 if not book.watch(book.since, last_minute + 1):
-                    book.flatten(last_minute)
+                    book.flatten(min(last_minute, n - 1))
             if should_stop is not None and g % 50 == 0 and should_stop():
                 raise JobStopped()
 
@@ -301,7 +332,7 @@ def run(data: FuturesData, module: ModuleType, params: dict[str, Any] | None, co
     trade_list = _trade_arrays(trade_rows)
     return FuturesRun(days=data.days[sl].copy(), pnl=day_pnl[sl], dip=day_dip[sl], trades=per_day["trades"][sl],
                       minutes=per_day["minutes"][sl], slippage=per_day["slippage"][sl], fees=per_day["fees"][sl],
-                      contracts=contracts, feed=data.feed, trade_list=trade_list)
+                      contracts=contracts, feed=data.feed, trade_list=trade_list, final=final if open_end else None)
 
 
 def _trade_arrays(rows: list[tuple]) -> dict[str, np.ndarray]:

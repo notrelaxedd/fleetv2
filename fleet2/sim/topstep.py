@@ -79,7 +79,12 @@ class Rules:
     min_pass_rate_edge: float = 0.10
     max_lockbox_drop: float = 0.15
     min_shadow_days: int = 20
+    max_days_outside: float = 0.10
     max_download_usd: float = 0.0
+    account_start_balance: float = 50_000.0
+    stop_at_loss_share: float = 0.80
+    flat_margin_minutes: int = 2
+    stale_decision_seconds: int = 180
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -93,7 +98,8 @@ class Rules:
         """A short fingerprint of every rule that changes the simulation (fees and the
         ready thresholds only change the money and the verdict, computed at display)."""
         skip = {"commission_per_side", "combine_monthly", "activation", "min_pass_rate_edge", "max_lockbox_drop",
-                "min_shadow_days", "max_download_usd"}
+                "min_shadow_days", "max_download_usd", "account_start_balance", "stop_at_loss_share",
+                "flat_margin_minutes", "stale_decision_seconds", "max_days_outside"}
         doc = {k: v for k, v in asdict(self).items() if k not in skip}
         return hashlib.sha256(json.dumps(doc, sort_keys=True).encode()).hexdigest()[:12]
 
@@ -136,6 +142,7 @@ def load_rules(path: Path) -> Rules:
     where = str(path) + ":"
     acc, con, exp = doc.get("account") or {}, doc.get("consistency") or {}, doc.get("express") or {}
     fees, costs, sim, ready = doc.get("fees") or {}, doc.get("costs") or {}, doc.get("simulator") or {}, doc.get("ready") or {}
+    live = doc.get("live") or {}
     kind = con.get("kind", "target")
     if kind not in ("target", "total_profit"):
         raise RulesError(f"{where} [consistency] kind must be \"target\" or \"total_profit\", got {kind!r}")
@@ -178,7 +185,13 @@ def load_rules(path: Path) -> Rules:
         min_pass_rate_edge=_number(ready, "min_pass_rate_edge", f"{where} [ready]", 0, 1, default=0.10),
         max_lockbox_drop=_number(ready, "max_lockbox_drop", f"{where} [ready]", 0, 1, default=0.15),
         min_shadow_days=_number(ready, "min_shadow_days", f"{where} [ready]", 0, 1000, default=20, integer=True),
+        max_days_outside=_number(ready, "max_days_outside", f"{where} [ready]", 0, 1, default=0.10),
         max_download_usd=_number(doc.get("data") or {}, "max_download_usd", f"{where} [data]", 0, 1e6, default=0.0),
+        account_start_balance=_number(live, "account_start_balance", f"{where} [live]", 0, 1e7, default=50_000.0),
+        stop_at_loss_share=_number(live, "stop_at_loss_share", f"{where} [live]", 0.05, 1.0, default=0.80),
+        flat_margin_minutes=_number(live, "flat_margin_minutes", f"{where} [live]", 0, 60, default=2, integer=True),
+        stale_decision_seconds=_number(live, "stale_decision_seconds", f"{where} [live]", 20, 3600, default=180,
+                                       integer=True),
     )
 
 
@@ -426,8 +439,11 @@ def evaluate(data: Any, module: ModuleType, params: dict[str, Any], rules: Rules
                       "net_pnl": float(run.pnl.sum()), "worst_stretch": fb.worst_stretch(run.pnl, run.dip)})
     double = fb.run(data, module, params, costs.doubled(), 1, end_of_day, first_day, last_day, None, should_stop, targets)
     twin_one = fb.run(data, module, params, costs, 1, end_of_day, first_day, last_day, 1, should_stop, targets)
+    band = np.percentile(one.pnl, [1, 5, 50, 95, 99]) if one.pnl.size else np.zeros(5)
     return {
         "numbers": fb.summarize(one),
+        # The spread of daily results at one contract: live days are compared with it.
+        "daily_band": {k: round(float(v), 2) for k, v in zip(("p01", "p05", "p50", "p95", "p99"), band)},
         "double_slippage_pnl": round(float(double.pnl.sum()), 2),
         "twin_curve": fb.summarize(twin_one)["curve"],
         "sizes": sizes,

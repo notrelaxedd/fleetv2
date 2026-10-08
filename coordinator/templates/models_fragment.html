@@ -1,6 +1,7 @@
 <div data-region="status">{% include "_status.html" %}</div>
 <div data-region="banner">{% include "_banner.html" %}</div>
 <div data-region="models-search">{% include parts.search %}</div>
+{% if view == "futures" %}<div data-region="topstep">{% include "_futures_topstep.html" %}</div>{% endif %}
 <div data-region="models-list">{% include parts.list %}</div>
 {% if selected %}
 <div data-region="model-head">{% include parts.head %}</div>

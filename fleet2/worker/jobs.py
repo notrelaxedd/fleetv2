@@ -61,6 +61,10 @@ def run_backtest(params: dict[str, Any], checkpoint: dict[str, Any] | None, emit
 
 
 def run_paper_trade(params: dict[str, Any], checkpoint: dict[str, Any] | None, emit: Emit, should_stop: ShouldStop) -> Any:
+    if params.get("market") == "futures":  # Alpaca paper or Topstep
+        from fleet2.worker.futures_live_job import run_futures_live
+
+        return run_futures_live(params, checkpoint, emit, should_stop)
     from fleet2.worker.paper_job import run_paper_trade as run
 
     return run(params, checkpoint, emit, should_stop)

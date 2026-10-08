@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from coordinator import auth, data, futures_data
+from coordinator import auth, data, futures_data, futures_live
 from coordinator.api.deps import DB, bearer, require_owner
 from coordinator.api.serialize import jsonable
 from coordinator.errors import BadRequest, Forbidden, NotFound
@@ -93,6 +93,25 @@ def futures_bars(
         body, etag = futures_data.payload(conn, through)
     except LookupError:
         raise NotFound("No futures prices yet: run a Futures prices job") from None
+    headers = {"ETag": etag, "Cache-Control": "no-cache"}
+    if _etag_matches(request.headers.get("if-none-match"), etag):
+        return Response(status_code=304, headers=headers)
+    return Response(content=body, media_type="application/octet-stream", headers=headers)
+
+
+@router.get("/futures-live")
+def futures_live_bars(
+    request: Request,
+    source: Literal["alpaca", "topstepx", "synthetic"] = Query(...),
+    token: str = Depends(bearer),
+    conn: psycopg.Connection = DB,
+) -> Response:
+    """The latest weeks of live 1-minute futures prices of one source, for live trading jobs."""
+    auth.worker_for_token(conn, token)
+    try:
+        body, etag = futures_live.payload(conn, source)
+    except LookupError:
+        raise NotFound("No live futures prices yet: they load once a futures model starts trading") from None
     headers = {"ETag": etag, "Cache-Control": "no-cache"}
     if _etag_matches(request.headers.get("if-none-match"), etag):
         return Response(status_code=304, headers=headers)

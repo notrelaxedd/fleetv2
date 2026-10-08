@@ -14,12 +14,13 @@ model tested on proxy prices can never be.
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any
 
 import psycopg
 
-from coordinator import futures_data, futures_models
+from coordinator import futures_data, futures_models, futures_trading, safety
+from coordinator.topstep_broker import CONFIRM_PHRASE, NOT_SET
 from coordinator.models import STATUS_TEXT, list_models
 from coordinator.models_view import SPARK_POINTS, hold_text
 from fleet2.models.futures import REGISTRY
@@ -27,8 +28,8 @@ from fleet2.sim import futures_stats, topstep
 from fleet2.sim.cme_session import as_date
 
 FEED_TAG = {"databento": "Databento prices", "proxy": "Proxy prices", "synthetic": "Synthetic prices"}
-PAPER_NOTE = ("Futures models never place orders in this build. Shadow trading and Topstep come later, "
-              "and only with your OK.")
+PAPER_NOTE = ("A futures model first paper trades on Alpaca (SPY or QQQ shares standing in for its contracts). "
+              "Only once its checklist is complete can it trade on Topstep.")
 
 
 def dollars(value: float | None, signed: bool = True) -> str:
@@ -230,8 +231,10 @@ def cards(m: dict[str, Any], rules: topstep.Rules, pick: dict[str, Any], tries: 
     return out
 
 
-def verdict(m: dict[str, Any], rules: topstep.Rules, pick: dict[str, Any], check: dict[str, Any] | None) -> dict[str, Any]:
-    """The "ready for a Combine" checklist. Ready only when every item holds."""
+def verdict(m: dict[str, Any], rules: topstep.Rules, pick: dict[str, Any], check: dict[str, Any] | None,
+            paper: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The "ready for a Combine" checklist. Ready only when every item holds. `paper` is
+    the model's Alpaca paper record (futures_trading.paper_record)."""
     held = m["metrics"]["held_out"]
     feed = m["metrics"].get("feed") or held.get("feed")
     sim, twin = pick.get("sim") or {}, pick.get("twin") or {}
@@ -262,8 +265,20 @@ def verdict(m: dict[str, Any], rules: topstep.Rules, pick: dict[str, Any], check
         ok = (entry.get("net_pnl") or 0) > 0 and lock_rate is not None and lock_rate >= held_rate - rules.max_lockbox_drop
         item("Lockbox Final check: profitable, pass rate close to held-out", "ok" if ok else "no",
              f"Lockbox passes {share(lock_rate)}, held-out {share(sim.get('pass_rate'))}")
-    item(f"Shadow trading: {rules.min_shadow_days} days on live prices", "pending",
-         "Not built yet: it comes later, only with your OK")
+    label = (f"Alpaca paper trading: {rules.min_shadow_days}+ days, at most {rules.max_days_outside * 100:.0f}% of them "
+             "outside the backtest's range, and a profit")
+    if paper is None or (paper["days"] == 0 and paper["outside"] is not None):
+        item(label, "pending", "Not started yet")
+    else:
+        state = futures_trading.paper_ok(paper, rules)
+        if paper["outside"] is None:
+            note = "Run backtest again: this model was tested before its range of daily results was kept"
+        else:
+            note = (f"{paper['days']} day{'s' if paper['days'] != 1 else ''}, {dollars(paper['total'])}, "
+                    f"{paper['outside']} outside {dollars(paper['low'])} to {dollars(paper['high'])}")
+        item(label, state, note)
+    if held.get("sim_key") != rules.sim_key():
+        item("Tested under the current rules in config/topstep.toml", "no", "Run backtest again")
     ready = real and all(i["state"] == "ok" for i in items)
     first = next((i for i in items if i["state"] != "ok"), None)
     return {"ready": ready, "items": items,
@@ -307,8 +322,74 @@ def final_check_view(m: dict[str, Any], check: dict[str, Any] | None, running: b
                     "run again."}
 
 
+def paper_of(conn: psycopg.Connection, m: dict[str, Any], rules: topstep.Rules, now: datetime) -> dict[str, Any]:
+    """The model's Alpaca paper record, compared with its held-out daily range at the
+    contracts it trades."""
+    held = (m.get("metrics") or {}).get("held_out") or {}
+    book = conn.execute("SELECT contracts FROM futures_books WHERE model_id = %s AND venue = 'alpaca_paper' "
+                        "ORDER BY id DESC LIMIT 1", (m["id"],)).fetchone()
+    contracts = int(book["contracts"]) if book else 1
+    return futures_trading.paper_record(conn, m["id"], held.get("daily_band"), contracts, rules, futures_trading.trading_day(now))
+
+
+def model_verdict(conn: psycopg.Connection, model_id: str, rules: topstep.Rules,
+                  now: datetime | None = None) -> dict[str, Any]:
+    """The checklist of one model, as the screen shows it ({"ready": False} when untested)."""
+    now = now or datetime.now(timezone.utc)
+    m = conn.execute("SELECT * FROM models WHERE id = %s", (model_id,)).fetchone()
+    if m is None or m["market"] != "futures" or not (m["metrics"] or {}).get("held_out"):
+        return {"ready": False, "items": [], "text": "Not tested yet"}
+    pick = chosen(m["metrics"]["held_out"], rules)
+    return verdict(m, rules, pick, futures_models.final_check(conn, model_id), paper_of(conn, m, rules, now))
+
+
+def trading_view(conn: psycopg.Connection, m: dict[str, Any], rules: topstep.Rules, venues: Any, st: dict[str, Any],
+                 ready: bool, now: datetime) -> dict[str, Any]:
+    """The Alpaca paper and Topstep buttons of one model, and what each book is doing."""
+    out: dict[str, Any] = {}
+    fees = rules.missing_trading_fees()
+    for venue in futures_trading.VENUES:
+        book = futures_trading.open_book(conn, m["id"], venue)
+        active = book is not None and book["status"] == "active"
+        reason = None
+        if not active:
+            if m["status"] == "retired":
+                reason = "This model is retired."
+            elif not st["tested"]:
+                reason = "Run a backtest first."
+            elif fees:
+                reason = f"{topstep.FEE_MESSAGE} first."
+            elif book is not None:
+                reason = "Stopping: closing its position."
+            elif venue == "alpaca_paper" and venues is not None:
+                broker = venues.alpaca.broker
+                if not broker.connected:
+                    reason = broker.problem
+                elif broker.mode != "paper":
+                    reason = "The coordinator is in live mode: futures models only paper trade on Alpaca."
+            elif venue == "topstep":
+                if not ready:
+                    reason = "Only a model ready for a Combine (every line of its checklist ticked) trades on Topstep."
+                elif venues is None or not venues.topstep.on:
+                    reason = venues.topstep.problem if venues is not None else "Topstep is not connected."
+                elif safety.topstep_paused(conn):
+                    reason = safety.topstep_paused(conn)
+        word = "paper trading on Alpaca" if venue == "alpaca_paper" else "trading on Topstep"
+        out[venue] = {
+            "active": active,
+            "button": ("Stop " if active else "Start ") + word,
+            "action": "futures-stop" if active else "futures-start",
+            "disabled": reason is not None and not active,
+            "reason": reason,
+            "book": futures_trading.book_line(conn, book, now) if book else None,
+        }
+    return out
+
+
 def detail(m: dict[str, Any], rules: topstep.Rules, tries: dict[str, Any], check: dict[str, Any] | None,
-           running: bool, feed: str | None) -> dict[str, Any]:
+           running: bool, feed: str | None, conn: psycopg.Connection | None = None, venues: Any = None,
+           now: datetime | None = None) -> dict[str, Any]:
+    now = now or datetime.now(timezone.utc)
     metrics = m.get("metrics") or {}
     st = _status(m, rules)
     model_feed = metrics.get("feed") or (metrics.get("held_out") or {}).get("feed")
@@ -328,6 +409,13 @@ def detail(m: dict[str, Any], rules: topstep.Rules, tries: dict[str, Any], check
         "tested": st["tested"], "paper_note": PAPER_NOTE,
         "final_check": final_check_view(m, check, running, st, rules, feed),
     }
+    paper = paper_of(conn, m, rules, now) if conn is not None and st["tested"] else None
+    ready = False
+    if st["tested"]:
+        out["verdict"] = verdict(m, rules, st["pick"], check, paper)
+        ready = out["verdict"]["ready"]
+    if conn is not None:
+        out["trading"] = trading_view(conn, m, rules, venues, st, ready, now)
     if not st["tested"]:
         out["untested"] = "Not tested yet. Press Run backtest to see how it would have done under Topstep's rules."
         return out
@@ -356,13 +444,46 @@ def detail(m: dict[str, Any], rules: topstep.Rules, tries: dict[str, Any], check
         if train.get("neighbour_median") is not None:
             out["training_line"] += f" · settings 10% either way score {train['neighbour_median']:.2f}"
     out["metrics"] = cards(m, rules, pick, tries)
-    out["verdict"] = verdict(m, rules, pick, check)
+    return out
+
+
+def topstep_panel(conn: psycopg.Connection, venues: Any) -> dict[str, Any]:
+    """What the screen says about the Topstep connection."""
+    if venues is None:
+        return {"state": "off", "text": NOT_SET, "confirm": False}
+    link = venues.topstep
+    stopped = safety.topstep_paused(conn)
+    if link.client is None:
+        return {"state": "off", "text": link.problem or NOT_SET, "confirm": False}
+    if not link.on:
+        return {"state": "unconfirmed", "text": link.problem, "confirm": True, "phrase": CONFIRM_PHRASE}
+    acc = venues.topstep_state or {}
+    text = "Topstep: connected" + (" (demo data)" if getattr(link.client, "fake", False) else "")
+    if acc.get("account"):
+        text += (f" to {acc['account']} · balance ${acc['balance']:,.0f} · loss floor ${acc['floor']:,.0f} · "
+                 f"${acc['room']:,.0f} of room")
+    elif acc.get("error"):
+        text += f" · account check failed: {acc['error']}"
+    return {"state": "paused" if stopped else "on", "text": text, "paused": stopped, "confirm": False}
+
+
+def live_signals(conn: psycopg.Connection, now: datetime) -> list[dict[str, Any]]:
+    """Every trading model's latest signal, for trading by hand on TopstepX."""
+    out = []
+    for book in conn.execute("SELECT b.*, m.name AS model_name FROM futures_books b JOIN models m ON m.id = b.model_id "
+                             "WHERE b.status = 'active' ORDER BY m.name").fetchall():
+        line = futures_trading.book_line(conn, book, now)
+        if line["signal"]:
+            out.append({"model": book["model_name"], "venue": futures_trading.VENUE_TEXT[book["venue"]],
+                        "signal": line["signal"].removeprefix("Live signal: ")})
     return out
 
 
 def futures_page(conn: psycopg.Connection, rules: topstep.Rules, selected_id: str | None = None,
-                 search: dict[str, Any] | None = None) -> dict[str, Any]:
+                 search: dict[str, Any] | None = None, venues: Any = None,
+                 now: datetime | None = None) -> dict[str, Any]:
     """The futures list (ranked), the selected model and the prices and search panel."""
+    now = now or datetime.now(timezone.utc)
     models = [m for m in list_models(conn, include_retired=True) if m["market"] == "futures"]
     rows = ranked([list_row(m, rules) for m in models])
     by_id = {m["id"]: m for m in models}
@@ -385,7 +506,7 @@ def futures_page(conn: psycopg.Connection, rules: topstep.Rules, selected_id: st
     if chosen_id:
         running = futures_models.final_check_running(conn, chosen_id)
         selected = detail(by_id[chosen_id], rules, tries, futures_models.final_check(conn, chosen_id), running,
-                          prices["feed"])
+                          prices["feed"], conn, venues, now)
     return {
         "view": "futures",
         "notice": notice,
@@ -397,4 +518,6 @@ def futures_page(conn: psycopg.Connection, rules: topstep.Rules, selected_id: st
         "tries_line": (f"{total_tries:,} futures settings tried so far"
                        if total_tries and not (search or {}).get("running") else None),
         "search": search or {"running": False, "button": "Start model search", "detail": None},
+        "topstep": topstep_panel(conn, venues),
+        "signals": live_signals(conn, now),
     }

@@ -6,3 +6,17 @@
 <p class="small{% if fc.stored %} fcheck{% else %} muted{% endif %}" data-final-check="{{ 'stored' if fc.stored else 'open' }}">{{ fc.text }}</p>
 {% if fc.reason %}<p class="muted small" data-final-reason>{{ fc.reason }}</p>{% endif %}
 <p class="muted small" data-paper-note>{{ selected.paper_note }}</p>
+{% if selected.trading %}
+<div class="mactions ftrade" data-trading>
+{% for venue, t in selected.trading.items() %}
+  <button type="button" class="btn" data-action="{{ t.action }}" data-venue="{{ venue }}" data-model-id="{{ selected.id }}"{% if t.disabled %} disabled{% endif %}>{{ t.button }}</button>
+{% endfor %}
+</div>
+{% for venue, t in selected.trading.items() %}
+{% if t.book %}
+<p class="paperline" data-book="{{ venue }}" data-tone="{{ t.book.tone }}">{{ t.book.line }}</p>
+{% if t.book.signal %}<p class="small" data-signal="{{ venue }}">{{ t.book.signal }}</p>{% endif %}
+{% if t.book.waiting %}<p class="muted small" data-waiting="{{ venue }}">{{ t.book.waiting }}</p>{% endif %}
+{% elif t.reason %}<p class="muted small" data-trade-reason="{{ venue }}">{{ t.button }}: {{ t.reason }}</p>{% endif %}
+{% endfor %}
+{% endif %}
