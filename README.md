@@ -202,6 +202,24 @@ score is dropped when a better one is found).
 - **Same limits as paper trading.** Backtests use the same balance and the same
   per-position and per-model caps.
 
+Futures models have their own backtester (`fleet2/sim/futures_backtest.py`) with the
+same promise, adapted to day trading:
+
+- **No lookahead.** A model decides on 1-, 3-, 5- or 15-minute bars built from 1-minute
+  bars, and each decision fills at the open of the next 1-minute bar. Every futures model
+  must pass the cut-off test: its answers up to any bar stay exactly the same when the
+  prices after that bar are cut off.
+- **Whole contracts, long or short**, with slippage on every fill (1 tick each side by
+  default) and the commission and exchange fees per contract per side from
+  `config/topstep.toml`.
+- **Stops and targets assume the worst.** A stop and a target in the same minute: the
+  stop fills. A minute that opens past the stop fills at that open. A target only fills
+  once the price trades through it.
+- **Flat every day.** No new trades from 14:50 Chicago time, everything closed at 15:00
+  (Topstep's own deadline is 15:10). Half days close at 12:00.
+- **Results by day:** profit or loss, the worst moment of the day including open trades
+  (that is what Topstep's loss limit watches), trades and minutes held.
+
 ## When a worker goes offline
 
 Within about 30 seconds its card says "Offline" and its job fails with "Worker w3 went
