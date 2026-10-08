@@ -169,4 +169,8 @@ def check_origin(config: Config, method: str, origin_header: str | None) -> None
     if method.upper() in {"GET", "HEAD", "OPTIONS"} or origin_header is None:
         return
     if normalise_origin(origin_header) not in config.allowed_origins:
-        raise Forbidden("origin not allowed")
+        raise Forbidden(
+            f"origin not allowed: this page is {origin_header.strip()} but the coordinator expects "
+            f"{' or '.join(config.allowed_origins)}. Set FLEET_PUBLIC_URL in .env to the address you open, "
+            "then run: docker compose up -d coordinator"
+        )

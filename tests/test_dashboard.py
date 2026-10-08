@@ -236,3 +236,12 @@ def test_pages_need_the_owner_login(config, broker):
         assert c.get("/fragments/fleet").status_code == 401
         ok = c.get("/fleet", headers={"Tailscale-User-Login": "owner@example.com"})
         assert ok.status_code == 200
+
+
+def test_a_wrong_origin_says_what_was_sent_and_what_is_expected(client):
+    r = client.post("/api/trading/pause", headers={"Origin": "https://box1.example.ts.net"})
+    assert r.status_code == 403
+    text = r.text
+    assert "https://box1.example.ts.net" in text and "http://127.0.0.1:8090" in text and "FLEET_PUBLIC_URL" in text
+    ok = client.post("/api/trading/pause", headers={"Origin": "http://127.0.0.1:8090/"})
+    assert ok.status_code != 403
