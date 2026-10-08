@@ -103,3 +103,26 @@ def test_coordinator_restart_keeps_running_jobs(client, conn):
     assert recovery.startup_grace(conn, 30) == 1
     queue.reap(conn)
     assert conn.execute("SELECT status FROM jobs WHERE id = %s", (job["id"],)).fetchone()["status"] == "leased"
+
+
+def test_backtest_job_carries_model_and_limits_and_stores_result(client, conn):
+    w = enroll(client, conn, "w11")
+    heartbeat(client, w)
+    resp = client.post("/api/jobs", json={"kind": "backtest", "model_id": "momentum", "target": "auto"})
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["message"] == "Backtest sent to w11"
+    job = heartbeat(client, w, want_job=True)["claimed"][0]
+    assert job["params"]["module"] == "momentum" and job["params"]["market"] == "stocks"
+    assert job["params"]["limits"] == {"money": 10000.0, "max_per_position": 1000.0, "max_per_model": 10000.0}
+    assert job["params"]["held_out_fraction"] == 0.25
+    metrics = {"held_out": {"roi": 0.05}, "train": {"roi": 0.1}}
+    r = client.post("/api/v1/models/momentum/backtest", json={"job_id": job["id"], "backtest_metrics": metrics},
+                    headers={"Authorization": "Bearer " + w["worker_token"]})
+    assert r.status_code == 200 and r.json()["status"] == "backtested"
+    row = conn.execute("SELECT status, metrics FROM models WHERE id = 'momentum'").fetchone()
+    assert row["metrics"]["held_out"]["roi"] == 0.05
+
+
+def test_backtest_needs_a_model_and_paper_trade_is_not_ready(client):
+    assert client.post("/api/jobs", json={"kind": "backtest"}).status_code == 400
+    assert client.post("/api/jobs", json={"kind": "paper_trade", "model_id": "momentum"}).status_code == 400

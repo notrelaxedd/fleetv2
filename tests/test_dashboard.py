@@ -182,14 +182,15 @@ def test_assign_panel_dropdowns(client, conn):
     html = client.get("/fleet").text
     kind = html[html.index('data-field="kind"'):html.index('data-field="model"')]
     options = re.findall(r"<option [^>]*>([^<]*)</option>", kind)
-    assert options == ["Backtest (coming soon)", "Paper trade (coming soon)",
-                       "Model search (coming soon)", "Data refresh (coming soon)"]  # none are available in stage 1
-    assert kind.count("disabled") == 4
+    assert options == ["Backtest", "Paper trade (coming soon)",
+                       "Model search (coming soon)", "Data refresh"]  # stage 2: backtest and data refresh
+    assert kind.count("disabled") == 2
     assert "Test one model on past prices and save its results." in html
-    assert 'data-field-wrap="model"' in html and 'value="" disabled selected>No models yet' in html
+    model = html[html.index('data-field="model"'):html.index('data-field="worker"')]
+    assert re.findall(r"<option [^>]*>([^<]*)</option>", model) == ["Crypto trend", "Dip buyer", "Momentum", "Pairs"]
     worker = html[html.index('data-field="worker"'):]
     assert re.findall(r"<option [^>]*>([^<]*)</option>", worker)[:3] == ["Auto — pick the least busy", "w1", "All idle workers"]
-    assert re.search(r'<button[^>]*data-action="assign"[^>]*disabled', html)  # nothing to assign yet
+    assert not re.search(r'<button[^>]*data-action="assign"[^>]*disabled', html)
 
 
 def test_assign_panel_enables_available_jobs_and_hides_model_when_not_needed(client, monkeypatch):

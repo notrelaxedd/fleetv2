@@ -12,12 +12,14 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from coordinator import db, web
-from coordinator.api import dashboard, dl, jobs, owner, workers
+from coordinator.api import dashboard, data, dl, jobs, models, owner, workers
 from coordinator.broker import BrokerStatus, make_broker
 from coordinator.bundle import build_bundle
 from coordinator.config import Config
+from coordinator.data import make_bar_source
 from coordinator.errors import QueueError
 from coordinator.limits import load_limits
+from coordinator import models as starter_models
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +131,8 @@ def create_app(config: Config, broker_status: BrokerStatus | None = None) -> Fas
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.pool = db.make_pool(config.database_url)
+        with app.state.pool.connection() as conn:
+            starter_models.sync_starters(conn)
         try:
             yield
         finally:
@@ -140,6 +144,7 @@ def create_app(config: Config, broker_status: BrokerStatus | None = None) -> Fas
     if broker_status is None:
         broker_status = BrokerStatus(make_broker(config, _live_confirmed(config)))
     app.state.broker_status = broker_status
+    app.state.bar_source = make_bar_source(config)
     app.state.bundle = build_bundle()
     log.info("worker bundle code_version=%s", app.state.bundle.code_version)
 
@@ -159,7 +164,11 @@ def create_app(config: Config, broker_status: BrokerStatus | None = None) -> Fas
 
     app.include_router(workers.router)
     app.include_router(jobs.router)
+    app.include_router(data.router)
+    app.include_router(data.owner_router)
     app.include_router(owner.router)
+    app.include_router(models.worker_router)
+    app.include_router(models.owner_router)
     app.include_router(owner.health_router)
     app.include_router(dl.router)
     app.include_router(dashboard.router)

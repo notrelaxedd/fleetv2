@@ -14,6 +14,7 @@ import psycopg
 
 from coordinator.broker import LIVE, BrokerStatus
 from coordinator.limits import Limits
+from coordinator.models import list_models
 from coordinator.settings import get_int_setting, get_setting
 
 TZ = ZoneInfo("America/New_York")
@@ -32,7 +33,7 @@ JOB_CHOICES = (
 )
 NEEDS_MODEL = ("backtest", "paper_trade")
 # Job kinds the workers can run in this build; the others are listed but not offered yet.
-AVAILABLE_KINDS: tuple[str, ...] = ("sleep",)
+AVAILABLE_KINDS: tuple[str, ...] = ("sleep", "data_refresh", "backtest")
 PAUSED_BANNER = "All trading is paused. No model will place orders until you resume. Backtests keep running."
 
 
@@ -201,11 +202,12 @@ def workers(conn: psycopg.Connection, limits: Limits, now: datetime) -> list[dic
         """
         SELECT w.*, EXTRACT(EPOCH FROM (now() - w.last_heartbeat_at)) AS silent_s,
                j.id AS job_id, j.kind AS job_kind, j.progress AS job_progress, j.detail AS job_detail,
-               j.model_id AS job_model_id, j.status AS job_status
+               m.name AS job_model_name, j.status AS job_status
           FROM workers w
           LEFT JOIN LATERAL (
             SELECT * FROM jobs WHERE lease_worker_id = w.id AND status IN ('leased', 'cancel_requested')
              ORDER BY started_at DESC LIMIT 1) j ON true
+          LEFT JOIN models m ON m.id = j.model_id
         """
     ).fetchall()
     cards = []
@@ -229,8 +231,8 @@ def workers(conn: psycopg.Connection, limits: Limits, now: datetime) -> list[dic
         else:
             job = {"kind": r["job_kind"], "progress": r["job_progress"]}
             task = JOB_LABELS.get(r["job_kind"], r["job_kind"])
-            if r["job_model_id"]:
-                task += f" · {r['job_model_id']}"
+            if r["job_model_name"]:
+                task += f" · {r['job_model_name']}"
             detail = r["job_detail"] or ("Stopping" if r["job_status"] == "cancel_requested" else "Starting")
             card.update(state="busy", dot="hot" if hot else "busy", task=task, detail=detail,
                         progress=_progress(job), job_id=str(r["job_id"]))
@@ -262,9 +264,10 @@ def previous_jobs(conn: psycopg.Connection, now: datetime, limit: int = 50) -> l
     """Finished jobs, newest first: Job, Model, Worker, Finished, Took, Result, Status."""
     rows = conn.execute(
         """
-        SELECT j.*, w.name AS worker_name,
+        SELECT j.*, w.name AS worker_name, m.name AS model_name,
                EXTRACT(EPOCH FROM (j.finished_at - COALESCE(j.started_at, j.created_at))) AS took_s
           FROM jobs j LEFT JOIN workers w ON w.id = j.last_worker_id
+          LEFT JOIN models m ON m.id = j.model_id
          WHERE j.status IN ('succeeded', 'failed', 'cancelled')
          ORDER BY j.finished_at DESC NULLS LAST LIMIT %s
         """,
@@ -276,7 +279,7 @@ def previous_jobs(conn: psycopg.Connection, now: datetime, limit: int = 50) -> l
         out.append({
             "id": str(r["id"]),
             "job": JOB_LABELS.get(r["kind"], r["kind"]),
-            "model": r["model_id"] or "-",
+            "model": r["model_name"] or "-",
             "worker": r["worker_name"] or "-",
             "finished": short_when(r["finished_at"], now),
             "took": duration(float(r["took_s"])) if r["took_s"] is not None and r["started_at"] else "-",
@@ -309,7 +312,8 @@ def fleet_page(conn: psycopg.Connection, status: BrokerStatus, limits: Limits, n
         "header": header(conn, status, now),
         "tiles": tiles(conn, status, limits, cards),
         "workers": cards,
-        "assign": assign_options(conn, cards, []),
+        "assign": assign_options(conn, cards, [
+            {"id": m["id"], "name": m["name"], "market": m["market"]} for m in list_models(conn)]),
         "previous_jobs": previous_jobs(conn, now),
         "server_time": now.isoformat(),
     }

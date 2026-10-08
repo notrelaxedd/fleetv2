@@ -52,6 +52,9 @@ class Config:
     alpaca_live_key_id: str = field(default="", repr=False)
     alpaca_live_secret: str = field(default="", repr=False)
     fake_broker: bool = False
+    # Stock price feed: "iex" (free, the default) or "sip" (Alpaca's paid consolidated
+    # feed; a paid source, so only with the owner's OK).
+    alpaca_data_feed: str = "iex"
 
     def __post_init__(self) -> None:
         if not self.allowed_origins:
@@ -81,6 +84,7 @@ class Config:
             alpaca_live_key_id=env.get("ALPACA_LIVE_KEY_ID", "").strip(),
             alpaca_live_secret=env.get("ALPACA_LIVE_SECRET_KEY", "").strip(),
             fake_broker=_as_bool(env.get("FLEET_FAKE_BROKER", "")),
+            alpaca_data_feed=(env.get("ALPACA_DATA_FEED", "iex").strip().lower() or "iex"),
         )
 
     @property

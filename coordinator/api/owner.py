@@ -8,7 +8,7 @@ import psycopg
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from coordinator import auth, fleet_view, queue
+from coordinator import auth, fleet_view, models, queue
 from coordinator.api.deps import DB, get_config, require_owner
 from coordinator.api.serialize import jsonable
 from coordinator.config import Config
@@ -48,14 +48,17 @@ def fleet(request: Request, conn: psycopg.Connection = DB) -> dict[str, Any]:
 
 
 @router.post("/jobs", status_code=201)
-def create_job(body: JobBody, conn: psycopg.Connection = DB, actor: str = Depends(require_owner)) -> dict[str, Any]:
+def create_job(body: JobBody, request: Request, conn: psycopg.Connection = DB) -> dict[str, Any]:
     """Assign a job. target: "auto", "all_idle" or a worker id. The confirmation line
     the dashboard shows comes back in `message`."""
     if body.kind != "sleep" and body.kind not in fleet_view.AVAILABLE_KINDS:
         raise BadRequest(f"{fleet_view.JOB_LABELS.get(body.kind, body.kind)} jobs are not available in this build yet")
     if body.kind in fleet_view.NEEDS_MODEL and not body.model_id:
         raise BadRequest("Pick a model for this job")
-    result = queue.create_job(conn, body.kind, body.params, body.target, body.model_id, body.idempotency_key)
+    if body.kind not in fleet_view.NEEDS_MODEL:
+        body.model_id = None
+    params = models.job_params(conn, body.kind, body.model_id, body.params, request.app.state.limits)
+    result = queue.create_job(conn, body.kind, params, body.target, body.model_id, body.idempotency_key)
     names = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM workers").fetchall()}
     lines = [_job_line(j, names) for j in result.jobs]
     message = lines[0] if len(lines) == 1 else f"{len(lines)} jobs sent, one to each idle worker"

@@ -44,6 +44,20 @@ def run_sleep(
     return {"slept": seconds, "summary": f"Slept {seconds} s"}
 
 
+def run_data_refresh(params: dict[str, Any], checkpoint: dict[str, Any] | None, emit: Emit, should_stop: ShouldStop) -> Any:
+    from fleet2.worker.data_job import run_data_refresh as run
+
+    return run(params, checkpoint, emit, should_stop)
+
+
+def run_backtest(params: dict[str, Any], checkpoint: dict[str, Any] | None, emit: Emit, should_stop: ShouldStop) -> Any:
+    from fleet2.worker.backtest_job import run_backtest_job
+
+    return run_backtest_job(params, checkpoint, emit, should_stop)
+
+
 JOBS: dict[str, JobFunc] = {
     "sleep": run_sleep,
+    "data_refresh": run_data_refresh,
+    "backtest": run_backtest,
 }
