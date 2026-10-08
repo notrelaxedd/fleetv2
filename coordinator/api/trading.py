@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from coordinator import auth, queue, trading
 from coordinator.api.deps import DB, bearer, require_owner
 from coordinator.api.serialize import jsonable
-from coordinator.broker import LIVE
+from coordinator.broker import LIVE, confirmation_for
 from coordinator.errors import BadRequest, Conflict
 from coordinator.settings import put_setting
 
@@ -96,7 +96,8 @@ def model_orders(model_id: str, conn: psycopg.Connection = DB) -> list[dict[str,
 @owner_router.get("/live")
 def live_state(request: Request, conn: psycopg.Connection = DB) -> dict[str, Any]:
     config = request.app.state.config
-    confirmed = conn.execute("SELECT value FROM settings WHERE key = 'live_confirmed'").fetchone()["value"] is True
+    stored = conn.execute("SELECT value FROM settings WHERE key = 'live_confirmed'").fetchone()["value"]
+    confirmed = isinstance(stored, dict) and stored.get("key") == confirmation_for(config)["key"] and bool(stored.get("key"))
     return {
         "mode": request.app.state.broker_status.broker.mode,
         "env_allows_live": config.alpaca_live_allowed,
@@ -114,9 +115,12 @@ def live_confirm(body: LiveBody, request: Request, conn: psycopg.Connection = DB
     live keys are in .env, and only after the coordinator restarts."""
     if body.confirm != LIVE_PHRASE:
         raise BadRequest(f"Type {LIVE_PHRASE} exactly to confirm")
-    if not request.app.state.config.alpaca_live_allowed:
+    config = request.app.state.config
+    if not config.alpaca_live_allowed:
         raise Conflict("ALPACA_LIVE=true is not set in .env on box1, so live trading stays off")
-    put_setting(conn, "live_confirmed", True, actor, "live_confirmed", confirmation_text=body.confirm)
+    if not (config.alpaca_live_key_id and config.alpaca_live_secret):
+        raise Conflict("Put your live Alpaca keys in .env first: the confirmation is for those keys")
+    put_setting(conn, "live_confirmed", confirmation_for(config), actor, "live_confirmed", confirmation_text=body.confirm)
     return {"message": "Confirmed. Restart the coordinator to switch to live trading."}
 
 

@@ -182,11 +182,11 @@ def create_app(config: Config, broker_status: BrokerStatus | None = None) -> Fas
     return app
 
 
-def _live_confirmed(config: Config) -> bool:
-    """The owner's stored live confirmation (read once at start; False when unreadable)."""
+def _live_confirmed(config: Config) -> Any:
+    """The owner's stored live confirmation (read once at start; None when unreadable)."""
     try:
         with db.connect(config.database_url) as conn:
             row = conn.execute("SELECT value FROM settings WHERE key = 'live_confirmed'").fetchone()
     except Exception:  # noqa: BLE001 - no database yet means not confirmed
-        return False
-    return bool(row) and row["value"] is True
+        return None
+    return row["value"] if row else None

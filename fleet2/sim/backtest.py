@@ -240,3 +240,11 @@ def buy_and_hold(data: MarketData, symbol: str, start: int, stop: int, money: fl
 def split_index(data: MarketData, held_out_fraction: float) -> int:
     """The first bar of the held-out period: the last `held_out_fraction` of the bars."""
     return int(round(data.n_bars * (1.0 - held_out_fraction)))
+
+
+def split_at(data: MarketData, start_t: int | None, held_out_fraction: float) -> int:
+    """The first bar of the held-out period: the first bar at or after the coordinator's
+    fixed held-out start date, or (with no date) the last held_out_fraction of the bars."""
+    if start_t is None:
+        return split_index(data, held_out_fraction)
+    return int(np.searchsorted(data.times, int(start_t), side="left"))

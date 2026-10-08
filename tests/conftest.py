@@ -111,3 +111,11 @@ def heartbeat(client: TestClient, worker: dict[str, Any], **body: Any) -> dict[s
                        headers={"Authorization": "Bearer " + worker["worker_token"]})
     assert resp.status_code == 200, resp.text
     return resp.json()
+
+
+def seed_history(conn: psycopg.Connection) -> None:
+    """A first and a last bar for each benchmark, so the held-out start date exists."""
+    for symbol, tf in (("SPY", "1Day"), ("BTC/USD", "1Hour")):
+        for ts in ("2020-01-02T05:00:00Z", "2026-01-02T05:00:00Z"):
+            conn.execute("INSERT INTO bars VALUES (%s, %s, %s, 100, 100, 100, 100, 1, 'test') ON CONFLICT DO NOTHING",
+                         (symbol, tf, ts))

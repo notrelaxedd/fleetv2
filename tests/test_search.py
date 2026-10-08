@@ -7,7 +7,7 @@ import pytest
 from coordinator import search
 from fleet2.sim.control import JobStopped
 from fleet2.worker import search_job
-from tests.conftest import enroll, heartbeat
+from tests.conftest import enroll, heartbeat, seed_history
 from tests.test_lookahead import synthetic
 
 
@@ -73,6 +73,7 @@ def test_the_coordinator_keeps_at_most_five_per_file_and_only_better_ones(client
 
 
 def test_start_and_stop_from_the_dashboard(client, conn):
+    seed_history(conn)
     for name in ("w1", "w2"):
         heartbeat(client, enroll(client, conn, name))
     resp = client.post("/api/search/start", json={})
@@ -86,13 +87,32 @@ def test_start_and_stop_from_the_dashboard(client, conn):
     assert not search.search_status(conn)["running"]
 
 
-def test_paper_job_decides_at_once_then_on_its_cadence():
+def test_paper_job_decides_at_once_then_every_rebalance_interval():
     from fleet2.models import momentum
     from fleet2.worker.paper_job import decision
 
-    params = dict(momentum.DEFAULT_PARAMS)
-    data = synthetic("stocks", 401)  # 401 is not a multiple of rebalance_every (5)
-    assert decision(data, momentum, params) is None
-    n, weights = decision(data, momentum, params, first=True)
+    params = dict(momentum.DEFAULT_PARAMS)  # rebalance_every 5
+    data = synthetic("stocks", 401)
+    n, weights = decision(data, momentum, params)
     assert n == 401 and isinstance(weights, dict)
-    assert decision(data.slice(0, 400), momentum, params)[0] == 400
+    decided_t = int(data.times[400])
+    assert decision(data, momentum, params, decided_t) is None
+    later = synthetic("stocks", 405)
+    assert decision(later, momentum, params, decided_t) is None  # 4 bars since
+    assert decision(synthetic("stocks", 406), momentum, params, decided_t)[0] == 406  # 5 bars since
+    assert decision(synthetic("stocks", 420), momentum, params, decided_t)[0] == 420  # a gap never skips a turn
+
+
+def test_paper_job_waits_while_prices_are_half_refreshed():
+    import numpy as np
+    from fleet2.models import pairs
+    from fleet2.sim.marketdata import MarketData
+    from fleet2.worker.paper_job import incomplete
+
+    data = synthetic("stocks", 300)
+    close = data.close.copy()
+    close[data.row("KO"), -1] = np.nan  # KO's newest bar has not arrived yet
+    half = MarketData(data.market, data.timeframe, data.feed, data.symbols, data.times, data.open, data.high,
+                      data.low, close, data.volume)
+    assert incomplete(half, pairs) == ["KO"]
+    assert incomplete(data, pairs) == []

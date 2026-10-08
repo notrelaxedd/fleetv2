@@ -53,7 +53,7 @@ def test_list_is_ranked_with_rank_and_signed_roi(client, stored):
     html = client.get("/models").text
     # enough trades first by ROI, then not enough trades, then not tested
     assert page_ids(html) == ["momentum", "dip_buy", "pairs", "crypto_trend"]
-    assert re.findall(r'data-rank="(\d+)"', html) == ["1", "2", "3", "4"]
+    assert re.findall(r'data-rank="(\d+)"', html) == ["1", "2"]  # only models with 100+ trades get a rank
     rows = html.split("data-models-list", 1)[1]
     rois = [re.sub(r"\s+", " ", unescape(m)).strip() for m in re.findall(r"<[^>]*data-roi[^>]*>(.*?)</", rows, re.S)]
     assert rois == ["+20.0%", "+5.0%", "+50.0%", "-"]
@@ -367,3 +367,10 @@ def test_sparkline_skips_nulls_and_handles_flat_and_short_input():
     flat = charts.sparkline([100, 100, 100])
     assert not re.search(r"\bnan\b", flat.lower())
     assert charts.sparkline([]) == "" and charts.sparkline([5]) == ""
+
+
+def test_no_model_is_ranked_when_none_has_enough_trades(client, conn):
+    models.store_backtest(conn, "pairs", metrics_with(0.5, 40), None)
+    html = client.get("/models").text
+    assert re.findall(r'data-rank="(\d+)"', html) == []
+    assert "No model has 100 trades on the held-out period yet, so none is ranked." in html

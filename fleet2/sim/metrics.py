@@ -20,7 +20,8 @@ def roi(equity: np.ndarray, money: float) -> float:
 
 
 def max_drawdown(equity: np.ndarray) -> float:
-    """The worst fall from a high point to a later low, as a fraction of the high."""
+    """The worst fall from a high point to a later low, as a fraction of the high.
+    Pass the curve with the starting money in front, so a loss on the first bar counts."""
     peaks = np.maximum.accumulate(equity)
     falls = np.where(peaks > 0, 1.0 - equity / peaks, 0.0)
     return float(falls.max()) if falls.size else 0.0
@@ -53,6 +54,8 @@ def summarize(run: Run) -> dict[str, Any]:
     """ROI, vs. buy and hold, max drawdown, Sharpe, win rate, profit factor, trades,
     average hold (seconds), plus the curve and the period it covers."""
     model_roi = roi(run.equity, run.money)
+    # The curve starts from the money the model was given, so the first bar's move counts.
+    full = np.concatenate(([run.money], run.equity))
     bench_ok = not np.isnan(run.benchmark).all()
     bench_roi = roi(run.benchmark, run.money) if bench_ok else None
     pnls = [t.pnl for t in run.trades]
@@ -63,8 +66,8 @@ def summarize(run: Run) -> dict[str, Any]:
         "roi": model_roi,
         "benchmark_roi": bench_roi,
         "vs_buy_and_hold": None if bench_roi is None else model_roi - bench_roi,
-        "max_drawdown": max_drawdown(run.equity),
-        "sharpe": sharpe(run.equity, run.bars_per_year),
+        "max_drawdown": max_drawdown(full),
+        "sharpe": sharpe(full, run.bars_per_year),
         "win_rate": len(wins) / len(pnls) if pnls else None,
         "profit_factor": (sum(wins) / -sum(losses)) if losses else None,
         "trades": len(pnls),

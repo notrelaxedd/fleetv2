@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from fleet2.models import get_module
 from fleet2.models.base import params_with_defaults
-from fleet2.sim.backtest import Limits, run_backtest, split_index
+from fleet2.sim.backtest import Limits, run_backtest, split_at
 from fleet2.sim.control import JobStopped
 from fleet2.sim.marketdata import MarketData, load
 from fleet2.sim.metrics import summarize
@@ -21,11 +21,13 @@ from fleet2.universe import HELD_OUT_FRACTION, MARKETS
 
 def backtest_periods(data: MarketData, module: Any, params: dict[str, Any], limits: Limits,
                      held_out_fraction: float, emit: Callable[[float, str], None] | None = None,
-                     should_stop: Callable[[], bool] | None = None) -> dict[str, Any]:
+                     should_stop: Callable[[], bool] | None = None, held_out_start_t: int | None = None) -> dict[str, Any]:
     """Training period [warm-up, split) and held-out period [split, end), both summarised.
     The held-out run may look back into training bars (that is the past, not the future)."""
     spec = MARKETS[data.market]
-    split = split_index(data, held_out_fraction)
+    split = split_at(data, held_out_start_t, held_out_fraction)
+    if not 1 < split < data.n_bars:
+        raise ValueError("the held-out start date is outside the price history; run a Data refresh")
     start = min(module.warmup(params), split - 1)
     periods = (("train", start, split), ("held_out", split, data.n_bars))
     total = sum(stop - begin for _, begin, stop in periods)
@@ -79,7 +81,7 @@ def run_backtest_job(params: dict[str, Any], checkpoint: dict[str, Any] | None, 
     emit({}, 0.02, f"Loaded {data.n_bars:,} bars of {len(data.symbols)} symbols")
     result = backtest_periods(
         data, module, model_params, limits, float(params.get("held_out_fraction", HELD_OUT_FRACTION)),
-        lambda frac, detail: emit({}, 0.02 + 0.97 * frac, detail), should_stop,
+        lambda frac, detail: emit({}, 0.02 + 0.97 * frac, detail), should_stop, params.get("held_out_start_t"),
     )
     result.update({"model_id": params.get("model_id"), "market": market, "params": model_params,
                    "feed": data.feed, "limits": raw})

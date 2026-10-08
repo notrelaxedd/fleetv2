@@ -27,15 +27,19 @@ from coordinator.broker import BrokerStatus, BrokerUnavailable
 from coordinator.errors import BadRequest, Conflict, NotFound
 from coordinator.limits import Limits
 from coordinator.models import get_model
-from coordinator.safety import approve_and_place, is_paused
+from coordinator.safety import HALTS, approve_and_place, is_paused
+from coordinator.broker import NEVER_REACHED
 from fleet2.models import get_module
 from fleet2.models.base import BadTargets, clean_targets
 from fleet2.sim.backtest import COSTS, MIN_TRADE_DOLLARS, Limits as SimLimits, _cap_targets
 
 log = logging.getLogger(__name__)
 OPEN_ORDER = ("submitting", "submitted", "partially_filled")
-# Blocks that mean "not now" (the decision is retried later) rather than "not this order".
-HALTS = ("trading is paused", "the stock market is closed")
+# A "submitting" row older than this was left by a crash between the record and Alpaca's
+# answer: the fill poller asks Alpaca about it by its client order id.
+STALE_SUBMITTING_S = 15
+# After Alpaca refused a sale of a stopping model, wait this long before trying again.
+CLOSE_RETRY_S = 300
 
 
 def _sim_limits(limits: Limits) -> SimLimits:
@@ -225,6 +229,11 @@ def execute_pass(conn: psycopg.Connection, status: BrokerStatus, limits: Limits)
         if book["market"] == "stocks" and not (status.clock_info and status.clock_info.is_open):
             _set_waiting(conn, book["id"], "Waiting for the stock market to open")
             continue
+        if book["status"] == "closing" and conn.execute(
+                "SELECT 1 FROM orders WHERE book_id = %s AND status = 'rejected'"
+                " AND finished_at > now() - make_interval(secs => %s)", (book["id"], CLOSE_RETRY_S)).fetchone():
+            _set_waiting(conn, book["id"], "Alpaca refused a sale; trying again in a few minutes")
+            continue
         held = {r["symbol"]: r["qty"] for r in conn.execute("SELECT symbol, qty FROM positions WHERE book_id = %s", (book["id"],))}
         weights = dict(book["targets"] or {})
         prices = latest_prices(conn, sorted(set(held) | set(weights)))
@@ -236,7 +245,7 @@ def execute_pass(conn: psycopg.Connection, status: BrokerStatus, limits: Limits)
             fresh = conn.execute("SELECT * FROM books WHERE id = %s", (book["id"],)).fetchone()
             row = approve_and_place(conn, status, limits, fresh, order, prices)
             sent += row["status"] != "blocked"
-            if row["status"] == "blocked" and row["error"] in HALTS or (row["error"] or "").startswith("Daily loss"):
+            if row["status"] == "blocked" and (row["error"] in HALTS or (row["error"] or "").startswith("Daily loss")):
                 halted = row["error"]
                 break  # paused, market closed, loss limit: try the whole decision again later
             poll_fills(conn, status, book_id=book["id"])
@@ -268,17 +277,21 @@ def close_if_flat(conn: psycopg.Connection, book_id: int) -> bool:
 
 
 def _book_fill(conn: psycopg.Connection, order: dict[str, Any], new_qty: float, price: float) -> None:
-    """Move a newly filled quantity into the model's book (cash and position)."""
+    """Move a newly filled quantity into the model's book (cash and position).
+
+    Buys are bought by dollar amount, so the book is charged exactly the dollars filled.
+    Alpaca takes its crypto fee out of what you receive: fewer coins on a buy, fewer
+    dollars on a sale. Stocks pay no fee (slippage is already in the fill price)."""
     fee = COSTS["crypto"].fee_bps / 10_000.0 if "/" in order["symbol"] else 0.0
     if order["side"] == "buy":
-        spent = new_qty * price * (1.0 + fee)
+        spent = new_qty * price
         conn.execute(
             """
             INSERT INTO positions (book_id, symbol, qty, cost) VALUES (%s, %s, %s, %s)
             ON CONFLICT (book_id, symbol) DO UPDATE SET qty = positions.qty + EXCLUDED.qty,
                    cost = positions.cost + EXCLUDED.cost
             """,
-            (order["book_id"], order["symbol"], new_qty, spent),
+            (order["book_id"], order["symbol"], new_qty * (1.0 - fee), spent),
         )
         conn.execute("UPDATE books SET cash = cash - %s WHERE id = %s", (spent, order["book_id"]))
         return
@@ -297,11 +310,20 @@ def _book_fill(conn: psycopg.Connection, order: dict[str, Any], new_qty: float, 
 
 
 def poll_fills(conn: psycopg.Connection, status: BrokerStatus, book_id: int | None = None) -> int:
-    """Ask Alpaca about every open order and book what filled. Returns orders updated."""
+    """Ask Alpaca about every open order and book what filled. Returns orders updated.
+
+    Includes "submitting" rows left by a crash (older than STALE_SUBMITTING_S): Alpaca
+    either has them (their state is adopted) or never got them (rejected, and the
+    model's decision is planned again from what the book really holds)."""
     rows = conn.execute(
-        "SELECT * FROM orders WHERE status IN ('submitted', 'partially_filled')"
-        " AND (%s::bigint IS NULL OR book_id = %s) ORDER BY created_at",
-        (book_id, book_id),
+        """
+        SELECT * FROM orders
+         WHERE (status IN ('submitted', 'partially_filled')
+                OR (status = 'submitting' AND created_at < now() - make_interval(secs => %s)))
+           AND (%s::bigint IS NULL OR book_id = %s)
+         ORDER BY created_at
+        """,
+        (STALE_SUBMITTING_S, book_id, book_id),
     ).fetchall()
     changed = 0
     for order in rows:
@@ -311,17 +333,23 @@ def poll_fills(conn: psycopg.Connection, status: BrokerStatus, book_id: int | No
             log.warning("fill check for %s failed: %s", order["id"], exc)
             continue
         new_qty = max(0.0, state.filled_qty - order["booked_qty"])
+        booked = 0.0
         if new_qty > 0 and state.filled_avg_price:
             _book_fill(conn, order, new_qty, state.filled_avg_price)
+            booked = new_qty
         done = state.status in ("filled", "cancelled", "rejected")
         conn.execute(
             """
             UPDATE orders SET status = %s, filled_qty = %s, filled_avg_price = %s, booked_qty = booked_qty + %s,
-                   error = COALESCE(%s, error), finished_at = CASE WHEN %s THEN now() ELSE finished_at END
+                   error = CASE WHEN %s IN ('filled', 'partially_filled') THEN NULL ELSE COALESCE(%s, error) END,
+                   finished_at = CASE WHEN %s THEN now() ELSE finished_at END
              WHERE id = %s
             """,
-            (state.status, state.filled_qty, state.filled_avg_price, new_qty, state.error, done, order["id"]),
+            (state.status, state.filled_qty, state.filled_avg_price, booked, state.status, state.error, done, order["id"]),
         )
+        if state.status == "rejected" and state.error == NEVER_REACHED:
+            # The decision this order belonged to was not carried out: plan it again.
+            conn.execute("UPDATE books SET executed_bar_t = NULL WHERE id = %s AND status = 'active'", (order["book_id"],))
         conn.commit()
         changed += 1
     return changed

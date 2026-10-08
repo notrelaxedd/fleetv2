@@ -17,7 +17,7 @@ from typing import Any
 
 import psycopg
 
-from coordinator.broker import BrokerStatus, BrokerUnavailable
+from coordinator.broker import BrokerStatus, BrokerUnavailable, OrderState
 from coordinator.limits import Limits
 from coordinator.settings import get_setting, put_setting
 
@@ -28,6 +28,12 @@ SYSTEM = "system"
 # worth an order (the same no-trade band the backtester uses).
 CAP_TOLERANCE = 25.0
 STATUS_MAX_AGE_S = 10.0
+# Reasons an order waits rather than fails; the executor retries the decision later.
+PAUSED = "trading is paused"
+MARKET_CLOSED = "the stock market is closed"
+NO_ACCOUNT = "the account value is unavailable, so the daily loss limit cannot be checked"
+NO_CLOCK = "the market clock is unavailable"
+HALTS = (PAUSED, MARKET_CLOSED, NO_ACCOUNT, NO_CLOCK)
 
 
 def is_paused(conn: psycopg.Connection) -> bool:
@@ -137,47 +143,59 @@ def approve_and_place(conn: psycopg.Connection, status: BrokerStatus, limits: Li
 
     order: {"symbol", "side": "buy"|"sell", "notional" (buys) | "qty" (sells), "reason",
     "worker_id"}. Checks, in order: the pause switch, the broker's mode against the
-    book's, the daily loss limit (on a fresh account reading), the stock market being
-    open, then the money limits. The row is committed as "submitting" before Alpaca is
-    called, so an order can never reach Alpaca without a record of it.
+    book's, a fresh account reading and the daily loss limit (no reading means no
+    order: it fails closed), the stock market being open (no clock means closed), then
+    the money limits. The row is committed as "submitting" before Alpaca is called, so
+    an order can never reach Alpaca without a record of it. The pause lock is held
+    until Alpaca has answered, so once pause_trading() returns no order is in flight.
     """
     broker = status.broker
-    conn.execute("SELECT pg_advisory_xact_lock(%s)", (PAUSE_LOCK,))
-    problem = None
-    if is_paused(conn):
-        problem = "trading is paused"
-    elif broker.mode != book["mode"]:
-        problem = f"this model trades {book['mode']} money but the coordinator is in {broker.mode} mode"
-    if problem is None:
-        status.refresh(force=status.age() > STATUS_MAX_AGE_S)
-        loss = check_daily_loss(conn, status, limits)
-        if loss:
-            problem = loss
-        elif "/" not in order["symbol"] and not (status.clock_info and status.clock_info.is_open):
-            problem = "the stock market is closed"
-        else:
+    conn.execute("SELECT pg_advisory_lock(%s)", (PAUSE_LOCK,))
+    try:
+        problem = None
+        if is_paused(conn):
+            problem = PAUSED
+        elif broker.mode != book["mode"]:
+            problem = f"this model trades {book['mode']} money but the coordinator is in {broker.mode} mode"
+        if problem is None:
+            status.refresh(force=status.age() > STATUS_MAX_AGE_S)
+            account = status.account_info
+            if account is None or account.last_equity <= 0:
+                problem = NO_ACCOUNT
+            else:
+                problem = check_daily_loss(conn, status, limits)
+        if problem is None and "/" not in order["symbol"]:
+            if status.clock_info is None:
+                problem = NO_CLOCK
+            elif not status.clock_info.is_open:
+                problem = MARKET_CLOSED
+        if problem is None:
             problem = limit_problem(conn, book, order, prices, limits)
-    if problem is not None:
-        row = _insert(conn, book, order, "blocked", problem)
+        if problem is not None:
+            row = _insert(conn, book, order, "blocked", problem)
+            conn.commit()
+            return row
+        row = _insert(conn, book, order, "submitting", None)
+        conn.commit()
+        try:
+            state = broker.place_order(str(row["id"]), order["symbol"], order["side"],
+                                       notional=order.get("notional"), qty=order.get("qty"))
+        except BrokerUnavailable as exc:
+            state = OrderState("submitted", error=f"no clear answer from Alpaca ({exc}); checking")
+        if state.status == "rejected":
+            row = conn.execute(
+                "UPDATE orders SET status = 'rejected', error = %s, finished_at = now() WHERE id = %s RETURNING *",
+                (state.error, row["id"]),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "UPDATE orders SET status = 'submitted', broker_order_id = %s, error = %s, submitted_at = now()"
+                " WHERE id = %s RETURNING *",
+                (state.broker_order_id, state.error, row["id"]),
+            ).fetchone()
         conn.commit()
         return row
-    row = _insert(conn, book, order, "submitting", None)
-    conn.commit()
-    try:
-        state = broker.place_order(str(row["id"]), order["symbol"], order["side"],
-                                   notional=order.get("notional"), qty=order.get("qty"))
-    except BrokerUnavailable as exc:
-        state = None
-        error = str(exc)
-    if state is None or state.status == "rejected":
-        row = conn.execute(
-            "UPDATE orders SET status = 'rejected', error = %s, finished_at = now() WHERE id = %s RETURNING *",
-            (state.error if state else error, row["id"]),
-        ).fetchone()
-    else:
-        row = conn.execute(
-            "UPDATE orders SET status = 'submitted', broker_order_id = %s, submitted_at = now() WHERE id = %s RETURNING *",
-            (state.broker_order_id, row["id"]),
-        ).fetchone()
-    conn.commit()
-    return row
+    finally:
+        conn.rollback()
+        conn.execute("SELECT pg_advisory_unlock(%s)", (PAUSE_LOCK,))
+        conn.commit()

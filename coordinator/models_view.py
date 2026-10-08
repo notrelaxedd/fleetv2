@@ -14,6 +14,7 @@ import psycopg
 
 from coordinator.fleet_view import TZ
 from coordinator.models import STATUS_TEXT, list_models
+from coordinator.settings import get_setting
 from fleet2.sim.metrics import MIN_TRADES
 from fleet2.universe import MARKETS
 
@@ -114,8 +115,14 @@ def _date(epoch: int | None) -> str:
     return d.strftime("%b ") + str(d.day) + d.strftime(", %Y")
 
 
-def list_row(m: dict[str, Any]) -> dict[str, Any]:
-    held = ((m.get("metrics") or {}).get("held_out")) or None
+def list_row(m: dict[str, Any], held_out_starts: dict[str, Any] | None = None) -> dict[str, Any]:
+    metrics = m.get("metrics") or {}
+    held = metrics.get("held_out") or None
+    start = (held_out_starts or {}).get(m["market"])
+    # A result on another held-out period (before the date was fixed) is not comparable.
+    stale = bool(held and start is not None and metrics.get("split_t") is not None
+                 and abs(int(metrics["split_t"]) - int(start)) > 3 * 86400)
+    enough = bool(held and int(held.get("trades") or 0) >= MIN_TRADES)
     return {
         "id": m["id"],
         "name": m["name"],
@@ -127,20 +134,29 @@ def list_row(m: dict[str, Any]) -> dict[str, Any]:
         "roi": signed_pct(held.get("roi")) if held else "-",
         "roi_value": held.get("roi") if held else None,
         "tone": _tone(held.get("roi")) if held else "plain",
-        "enough_trades": bool(held and held.get("enough_trades")),
-        "not_enough": bool(held and not held.get("enough_trades")),
+        "enough_trades": enough and not stale,
+        "not_enough": bool(held) and not enough,
+        "stale": stale,
         "spark": _spark(held.get("curve") if held else None),
     }
 
 
 def ranked(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Enough trades first (by ROI), then not enough trades (by ROI), then untested."""
+    """Ranked models (100+ held-out trades, current held-out period) first by ROI; then
+    the rest, unranked: not enough trades (by ROI), an old held-out period, untested.
+    Only ranked models get a rank number, so a model with under 100 trades is never
+    ranked first, even when no model has enough trades yet."""
     def key(r: dict[str, Any]) -> tuple[int, float, str]:
-        group = 0 if r["enough_trades"] else 1 if r["roi_value"] is not None else 2
+        group = 0 if r["enough_trades"] else 3 if r["roi_value"] is None else 2 if r["stale"] else 1
         return (group, -(r["roi_value"] or 0.0), r["name"])
     out = sorted(rows, key=key)
-    for i, r in enumerate(out, 1):
-        r["rank"] = i
+    rank = 0
+    for r in out:
+        if r["enough_trades"]:
+            rank += 1
+            r["rank"] = rank
+        else:
+            r["rank"] = None
     return out
 
 
@@ -151,7 +167,7 @@ def detail(m: dict[str, Any], paper: dict[str, Any] | None = None) -> dict[str, 
     market = m["market"]
     bench = MARKETS[market]["benchmark"].split("/")[0]
     tags = [MARKET_TEXT[market], STATUS_TEXT[m["status"]]]
-    if held and not held.get("enough_trades"):
+    if held and int(held.get("trades") or 0) < MIN_TRADES:
         tags.append("Not enough trades")
     out: dict[str, Any] = {
         "id": m["id"],
@@ -193,12 +209,17 @@ def models_page(conn: psycopg.Connection, selected_id: str | None = None,
                 paper: dict[str, dict[str, Any]] | None = None, search: dict[str, Any] | None = None) -> dict[str, Any]:
     """The list (ranked) and the selected model (the first in the list by default)."""
     all_models = list_models(conn, include_retired=True)
-    rows = ranked([list_row(m) for m in all_models])
+    starts = get_setting(conn, "held_out_start", None) or {}
+    rows = ranked([list_row(m, starts) for m in all_models])
     by_id = {m["id"]: m for m in all_models}
     chosen = selected_id if selected_id in by_id else (rows[0]["id"] if rows else None)
     for r in rows:
         r["selected"] = r["id"] == chosen
+    notice = None
+    if rows and not any(r["enough_trades"] for r in rows):
+        notice = "No model has 100 trades on the held-out period yet, so none is ranked."
     return {
+        "notice": notice,
         "models": rows,
         "selected": detail(by_id[chosen], (paper or {}).get(chosen)) if chosen else None,
         "search": search or {"running": False, "button": "Start model search", "detail": None},

@@ -21,6 +21,7 @@ from psycopg.types.json import Jsonb
 from coordinator import queue
 from coordinator.errors import Conflict
 from coordinator.limits import Limits
+from coordinator.models import held_out_start
 from fleet2.models import get_module
 from fleet2.universe import HELD_OUT_FRACTION
 
@@ -36,8 +37,10 @@ def running_jobs(conn: psycopg.Connection) -> list[dict[str, Any]]:
 def start(conn: psycopg.Connection, limits: Limits, markets: list[str] | None = None, target: str = "all_idle") -> dict[str, Any]:
     if running_jobs(conn):
         raise Conflict("Model search is already running")
+    markets = markets or ["stocks", "crypto"]
     params = {
-        "markets": markets or ["stocks", "crypto"],
+        "markets": markets,
+        "held_out_start_t": {m: held_out_start(conn, m) for m in markets},
         "candidates": 12,
         "limits": {"money": limits.starting_balance_per_model, "max_per_position": limits.max_per_position,
                    "max_per_model": limits.max_per_model},

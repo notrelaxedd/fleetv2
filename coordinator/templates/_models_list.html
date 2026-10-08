@@ -1,8 +1,9 @@
+{% if notice %}<p class="muted" data-notice="unranked">{{ notice }}</p>{% endif %}
 {% if models %}
 <ul class="mlist" data-models-list>
 {% for m in models %}
   <li>
-    <a class="mrow" href="/models?id={{ m.id | urlencode }}" data-model="{{ m.id }}" data-rank="{{ m.rank }}"{% if m.selected %} data-selected="true" aria-current="true"{% endif %}>
+    <a class="mrow" href="/models?id={{ m.id | urlencode }}" data-model="{{ m.id }}" data-rank="{{ m.rank if m.rank else '' }}"{% if m.selected %} data-selected="true" aria-current="true"{% endif %}>
       <span class="mname" data-name>{{ m.name }}</span>
       <span class="mroi num" data-roi data-tone="{{ m.tone }}">{{ m.roi }}</span>
       <span class="mdesc" data-description>{{ m.description }}</span>
@@ -11,6 +12,7 @@
         <span class="tag" data-tag="market">{{ m.market }}</span>
         <span class="tag" data-tag="status" data-status="{{ m.status_key }}">{{ m.status }}</span>
         {% if m.not_enough %}<span class="tag warn" data-tag="not-enough">Not enough trades</span>{% endif %}
+        {% if m.stale %}<span class="tag warn" data-tag="stale">Old held-out period: backtest again</span>{% endif %}
       </span>
     </a>
   </li>

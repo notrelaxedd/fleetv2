@@ -24,7 +24,7 @@ from typing import Any
 from fleet2.common import http
 from fleet2.models import REGISTRY
 from fleet2.models.base import draw_params, params_with_defaults
-from fleet2.sim.backtest import Limits, run_backtest, split_index
+from fleet2.sim.backtest import Limits, run_backtest, split_at
 from fleet2.sim.control import JobStopped
 from fleet2.sim.marketdata import MarketData, load
 from fleet2.sim.metrics import MIN_TRADES, summarize
@@ -81,7 +81,7 @@ def run_search(params: dict[str, Any], checkpoint: dict[str, Any] | None, emit: 
         done = 0
         for name in files:
             market = REGISTRY[name].MARKET
-            split = split_index(data[market], held_out_fraction)
+            split = split_at(data[market], (params.get("held_out_start_t") or {}).get(market), held_out_fraction)
             best: tuple[float, dict[str, Any], dict[str, Any]] | None = None
             for i in range(per_file):
                 if should_stop():

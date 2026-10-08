@@ -17,6 +17,8 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any
 
+import numpy as np
+
 from fleet2.common import http
 from fleet2.models import get_module
 from fleet2.models.base import clean_targets, params_with_defaults
@@ -47,16 +49,37 @@ def fetch_if_changed(host_url: str, token: str, market: str, etag: str | None) -
     return json.loads(gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw), new_etag
 
 
-def decision(data: MarketData, module: Any, params: dict[str, Any], first: bool = False) -> tuple[int, dict[str, float]] | None:
-    """(decision bar index, weights) when the next bar is a decision bar, else None.
-    The next bar to open is index n_bars; the backtester decides at bars where
-    (index - start) % every == 0, here anchored at index 0 of the cached history. The
-    very first decision of a job is made at once (as a backtest decides at its first
-    bar), so a newly started model does not sit in cash until its next turn."""
+def incomplete(data: MarketData, module: Any) -> list[str]:
+    """Model symbols that had the previous bar but not the newest one: the coordinator
+    is part way through refreshing prices, so deciding now would see a half-updated
+    market (and sell positions it means to keep). Empty when it is safe to decide."""
+    if data.n_bars < 2:
+        return []
+    out = []
+    for symbol in module.SYMBOLS:
+        if symbol in data.symbols:
+            row = data.close[data.row(symbol)]
+            if not np.isnan(row[-2]) and np.isnan(row[-1]):
+                out.append(symbol)
+    return out
+
+
+def decision(data: MarketData, module: Any, params: dict[str, Any], last_decided_t: int | None = None
+             ) -> tuple[int, dict[str, float]] | None:
+    """(decision bar index, weights) when it is the model's turn, else None.
+
+    The next bar to open is index n_bars. The first decision of a job is made at once
+    (as a backtest decides at its first bar); after that the model decides again once
+    rebalance_every bars have closed since the last bar it decided on, the same spacing
+    as in the backtest, and a gap (a worker or coordinator outage) never skips a turn."""
     n = data.n_bars
     every = max(1, int(module.rebalance_every(params)))
-    if n < module.warmup(params) or (n % every != 0 and not first):
+    if n < module.warmup(params):
         return None
+    if last_decided_t:
+        since = int(np.count_nonzero(data.times > last_decided_t))
+        if since < every:
+            return None
     return n, clean_targets(module.target_positions(History(data, n), params), module.SYMBOLS)
 
 
@@ -89,8 +112,11 @@ def run_paper_trade(params: dict[str, Any], checkpoint: dict[str, Any] | None, e
                     data = from_payload(payload)
                 if data is not None:
                     last_t = int(data.times[-1])
-                    picked = decision(data, module, model_params, first=sent_bar == 0)
-                    if picked is None:
+                    missing = incomplete(data, module)
+                    picked = None if missing else decision(data, module, model_params, sent_bar or None)
+                    if missing:
+                        status = f"Waiting for the newest prices of {', '.join(missing[:3])}"
+                    elif picked is None:
                         status = f"Prices through {_when(last_t)}; not this model's turn to decide"
                     elif last_t > sent_bar:
                         _, weights = picked

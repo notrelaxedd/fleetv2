@@ -81,6 +81,18 @@ STATUS_MAP = {
 }
 
 
+NEVER_REACHED = "the order never reached Alpaca"
+
+
+def _http_status(exc: Exception) -> int | None:
+    """The HTTP status of an alpaca-py APIError, None for transport errors."""
+    try:
+        code = getattr(exc, "status_code", None)
+        return int(code) if code is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 class Broker(Protocol):
     """What the rest of the coordinator may ask of Alpaca."""
 
@@ -174,14 +186,20 @@ class AlpacaBroker:
         )
         try:
             order = self._client.submit_order(request)
-        except Exception as exc:  # noqa: BLE001 - the API's message is the useful part
-            return OrderState("rejected", error=f"Alpaca refused the order: {exc}")
+        except Exception as exc:  # noqa: BLE001 - sorted into "refused" or "unknown" below
+            if _http_status(exc) is not None and 400 <= _http_status(exc) < 500:
+                return OrderState("rejected", error=f"Alpaca refused the order: {exc}")
+            # No clear answer (timeout, reset, 5xx): the order may exist at Alpaca. It
+            # stays open and the fill poller asks Alpaca by its client order id.
+            return OrderState("submitted", error=f"no clear answer from Alpaca ({exc}); checking")
         return self._state(order)
 
     def get_order(self, client_order_id: str) -> OrderState:
         try:
             order = self._client.get_order_by_client_id(client_order_id)
         except Exception as exc:  # noqa: BLE001
+            if _http_status(exc) == 404:
+                return OrderState("rejected", error=NEVER_REACHED)
             raise BrokerUnavailable(f"Alpaca order lookup: {exc}") from None
         return self._state(order)
 
@@ -246,17 +264,33 @@ class FakeBroker:
         return state
 
     def get_order(self, client_order_id: str) -> OrderState:
-        return getattr(self, "_orders", {}).get(client_order_id) or OrderState("rejected", error="unknown order")
+        return getattr(self, "_orders", {}).get(client_order_id) or OrderState("rejected", error=NEVER_REACHED)
 
 
-def choose_mode(config: Config, live_confirmed: bool) -> str:
-    """LIVE only with ALPACA_LIVE=true, the owner's confirmation and live keys; else PAPER."""
-    if config.alpaca_live_allowed and live_confirmed and config.alpaca_live_key_id and config.alpaca_live_secret:
-        return LIVE
-    return PAPER
+def key_fingerprint(key_id: str) -> str:
+    """A short, one-way fingerprint of a live key id (never the key itself)."""
+    import hashlib
+
+    return hashlib.sha256(key_id.encode("utf-8")).hexdigest()[:16] if key_id else ""
 
 
-def make_broker(config: Config, live_confirmed: bool = False) -> Broker:
+def confirmation_for(config: Config) -> dict[str, str]:
+    """What the owner's live confirmation stores: the fingerprint of the live keys it
+    was given for, so new or changed keys need a new confirmation."""
+    return {"key": key_fingerprint(config.alpaca_live_key_id)}
+
+
+def choose_mode(config: Config, live_confirmed: Any) -> str:
+    """LIVE only with ALPACA_LIVE=true, live keys, and the owner's confirmation given
+    for exactly those keys; PAPER otherwise. Decided once, when the coordinator starts."""
+    if not (config.alpaca_live_allowed and config.alpaca_live_key_id and config.alpaca_live_secret):
+        return PAPER
+    if not isinstance(live_confirmed, dict) or live_confirmed.get("key") != key_fingerprint(config.alpaca_live_key_id):
+        return PAPER
+    return LIVE
+
+
+def make_broker(config: Config, live_confirmed: Any = None) -> Broker:
     """The broker for this run of the coordinator."""
     if config.fake_broker:
         return FakeBroker()
@@ -305,10 +339,10 @@ class BrokerStatus:
         except BrokerUnavailable as exc:
             account_info, errors = None, errors + [str(exc)]
         with self._lock:
-            if clock_info is not None:
-                self.clock_info = clock_info
-            if account_info is not None:
-                self.account_info = account_info
+            # A failed reading clears the old one: safety checks must never trade on
+            # a stale account value or a stale "market open".
+            self.clock_info = clock_info
+            self.account_info = account_info
             self.error = "; ".join(errors) or None
         if errors:
             log.warning("broker status: %s", self.error)

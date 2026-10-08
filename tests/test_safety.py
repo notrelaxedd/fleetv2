@@ -10,7 +10,7 @@ from coordinator import models, safety, trading
 from coordinator.broker import LIVE, PAPER, FakeBroker, choose_mode
 from coordinator.config import Config
 from coordinator.limits import Limits
-from tests.conftest import enroll, heartbeat
+from tests.conftest import enroll, heartbeat, seed_history
 
 LIMITS = Limits()
 METRICS = {"held_out": {"roi": 0.05, "trades": 150, "enough_trades": True}, "train": {"roi": 0.1}}
@@ -87,6 +87,7 @@ def test_an_order_reaching_the_gate_while_paused_is_blocked_and_logged(client, c
 
 
 def test_backtests_keep_running_while_paused(client, conn):
+    seed_history(conn)
     client.post("/api/trading/pause")
     w = enroll(client, conn, "w2")
     heartbeat(client, w)
@@ -262,11 +263,18 @@ def test_a_signal_from_another_worker_or_with_bad_weights_is_refused(client, con
 
 
 def test_live_needs_the_env_switch_the_confirmation_and_live_keys():
+    from coordinator.broker import confirmation_for
+
     base = dict(database_url="x", alpaca_live_key_id="k", alpaca_live_secret="s")
-    assert choose_mode(Config(**base, alpaca_live_allowed=True), live_confirmed=True) == LIVE
-    assert choose_mode(Config(**base, alpaca_live_allowed=False), live_confirmed=True) == PAPER
-    assert choose_mode(Config(**base, alpaca_live_allowed=True), live_confirmed=False) == PAPER
-    assert choose_mode(Config(database_url="x", alpaca_live_allowed=True), live_confirmed=True) == PAPER
+    ok = confirmation_for(Config(**base))
+    assert choose_mode(Config(**base, alpaca_live_allowed=True), ok) == LIVE
+    assert choose_mode(Config(**base, alpaca_live_allowed=False), ok) == PAPER
+    assert choose_mode(Config(**base, alpaca_live_allowed=True), None) == PAPER
+    assert choose_mode(Config(**base, alpaca_live_allowed=True), True) == PAPER  # a bare "yes" is not enough
+    assert choose_mode(Config(database_url="x", alpaca_live_allowed=True), ok) == PAPER  # no live keys
+    # a confirmation given for other keys does not carry over to new ones
+    other = dict(base, alpaca_live_key_id="new-key")
+    assert choose_mode(Config(**other, alpaca_live_allowed=True), ok) == PAPER
 
 
 def test_the_dashboard_confirmation_is_refused_without_the_env_switch(client, conn):

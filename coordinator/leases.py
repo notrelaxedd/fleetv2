@@ -189,10 +189,11 @@ def release(
     if reason == "update" and not cancelled:
         # An endless job (paper trading, model search) handed back so its worker can
         # update itself: queued again for the same worker, which takes it back from
-        # its checkpoint a few seconds later.
+        # its checkpoint a few seconds later. The aim is marked automatic, so if the
+        # worker never comes back the dispatcher moves the job to another worker.
         conn.execute(
             """
-            UPDATE jobs SET status = 'queued', target_worker_id = lease_worker_id, target_auto = false,
+            UPDATE jobs SET status = 'queued', target_worker_id = lease_worker_id, target_auto = true,
                    progress = COALESCE(%s, progress), checkpoint = COALESCE(%s, checkpoint),
                    lease_worker_id = NULL, lease_token = NULL, lease_expires_at = NULL,
                    preempt_requested = false, updated_at = now()

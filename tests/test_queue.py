@@ -4,7 +4,7 @@ from __future__ import annotations
 import psycopg
 
 from coordinator import queue
-from tests.conftest import enroll, heartbeat
+from tests.conftest import enroll, heartbeat, seed_history
 
 
 def test_auto_job_goes_to_least_busy_worker_and_reports_progress(client, conn):
@@ -106,6 +106,7 @@ def test_coordinator_restart_keeps_running_jobs(client, conn):
 
 
 def test_backtest_job_carries_model_and_limits_and_stores_result(client, conn):
+    seed_history(conn)
     w = enroll(client, conn, "w11")
     heartbeat(client, w)
     resp = client.post("/api/jobs", json={"kind": "backtest", "model_id": "momentum", "target": "auto"})
