@@ -9,6 +9,9 @@ holds a key.
 Paper trading only by default. Real money needs several deliberate steps (see
 "Safety controls"). The build plan and its reasons are in `PLAN.md`.
 
+All commands below are run as root (`su -` first). Debian 13 often has no `sudo`, so none
+of them use it.
+
 ## Start the coordinator (box1, Debian with Docker)
 
 ```bash
@@ -17,7 +20,7 @@ cp .env.example .env        # then edit it (see below)
 chmod 600 .env
 docker compose up -d --build
 curl -s http://127.0.0.1:8090/healthz      # {"ok": true, "db": true}
-sudo tailscale serve --bg --https=443 http://127.0.0.1:8090
+tailscale serve --bg --https=443 http://127.0.0.1:8090
 tailscale funnel status                     # must show nothing public
 ```
 
@@ -53,7 +56,7 @@ On the worker (Debian with python3 3.11 or newer, run as root), with the token a
 worker's name:
 
 ```bash
-curl -fsSL https://box1.<tailnet>.ts.net/install.sh | sudo bash -s -- https://box1.<tailnet>.ts.net <token> --name w5
+curl -fsSL https://box1.<tailnet>.ts.net/install.sh | bash -s -- https://box1.<tailnet>.ts.net <token> --name w5
 ```
 
 It installs `python3-psutil` and `python3-numpy` from apt, puts fleet-v2 in
@@ -68,9 +71,9 @@ fleet-v2. Switch when you are ready, one box at a time:
 
 1. In the v1 dashboard, set the box idle and disable it. Never switch a box that is in
    v1's trade role.
-2. `sudo fleet2 use v2`
+2. `fleet2 use v2`
 
-To go back: wait for its v2 job to finish (or cancel it), then `sudo fleet2 use v1` and
+To go back: wait for its v2 job to finish (or cancel it), then `fleet2 use v1` and
 re-enable the box in v1. `fleet2 status` shows which agent is running. The two can never
 run at once (`Conflicts=` in the service file).
 

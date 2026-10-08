@@ -1,7 +1,7 @@
 #!/bin/bash
 # fleet2: switch this worker between the v1 agent (polymarket-fleet) and the v2 agent.
-#   sudo fleet2 use v2     stop and disable v1, enable and start v2
-#   sudo fleet2 use v1     stop and disable v2, enable and start v1
+#   fleet2 use v2     (as root) stop and disable v1, enable and start v2
+#   fleet2 use v1     (as root) stop and disable v2, enable and start v1
 #   fleet2 status          which agent is running
 # Neither agent is uninstalled: both stay on disk with their identities.
 # Before `use v2`, disable this box in the v1 dashboard (and never switch a box that is
@@ -19,7 +19,7 @@ case "${1:-status}" in
     echo "v2 ($V2): $(state $V2)"
     ;;
   use)
-    [ "$(id -u)" = 0 ] || { echo "run as root: sudo fleet2 use ${2:-v2}" >&2; exit 1; }
+    [ "$(id -u)" = 0 ] || { echo "run as root (su -, then: fleet2 use ${2:-v2})" >&2; exit 1; }
     case "${2:-}" in
       v2)
         systemctl list-unit-files "$V2" | grep -q "$V2" || { echo "fleet-v2 is not installed" >&2; exit 1; }
@@ -31,11 +31,11 @@ case "${1:-status}" in
         systemctl disable --now "$V2" >/dev/null 2>&1 || true
         systemctl enable --now "$V1"
         ;;
-      *) echo "usage: sudo fleet2 use v1|v2" >&2; exit 2 ;;
+      *) echo "usage (as root): fleet2 use v1|v2" >&2; exit 2 ;;
     esac
     sleep 2
     echo "v1 ($V1): $(state $V1)"
     echo "v2 ($V2): $(state $V2)"
     ;;
-  *) echo "usage: fleet2 status | sudo fleet2 use v1|v2" >&2; exit 2 ;;
+  *) echo "usage: fleet2 status | fleet2 use v1|v2 (as root)" >&2; exit 2 ;;
 esac

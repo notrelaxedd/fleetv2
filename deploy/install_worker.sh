@@ -4,16 +4,16 @@
 #   v2 lives in /var/lib/fleet2, runs as user fleet2, unit fleet2-worker.service.
 #   It never touches /var/lib/fleet, the fleet user or fleet-worker.service.
 #   If the v1 worker is running on this box, v2 is installed and enrolled but NOT
-#   started: switch with `sudo fleet2 use v2` when you are ready (and back with
-#   `sudo fleet2 use v1`). systemd's Conflicts= keeps the two from ever running at once.
+#   started: switch with `fleet2 use v2` (as root) when you are ready (and back with
+#   `fleet2 use v1`). systemd's Conflicts= keeps the two from ever running at once.
 #
 #   install_worker.sh HOST_URL [ENROLL_TOKEN] [--name NAME] [--reenroll] [--token-file PATH]
 #   install_worker.sh [ENROLL_TOKEN] [--name NAME] ...        (when served from /install.sh)
 #
 # The enroll token can be given on the command line, in env FLEET_ENROLL_TOKEN or in a
 # file (--token-file). Prefer the environment or a file: a token on the command line is
-# visible in the sudo log and in /proc/*/cmdline while the installer runs, e.g.
-#   curl -fsSL HOST_URL/install.sh | sudo FLEET_ENROLL_TOKEN=... bash -s -- HOST_URL
+# visible in the shell history and in /proc/*/cmdline while the installer runs, e.g. as root:
+#   curl -fsSL HOST_URL/install.sh | FLEET_ENROLL_TOKEN=... bash -s -- HOST_URL
 #
 # Needs only root, python3 >= 3.11 and tar. Downloads go through python3 urllib.
 # Idempotent: re-running upgrades the code and keeps the worker identity
@@ -42,8 +42,8 @@ usage: install_worker.sh HOST_URL [ENROLL_TOKEN] [--name NAME] [--reenroll] [--t
 The enroll token (needed for a first install or with --reenroll) comes from, in order:
 the ENROLL_TOKEN argument, --token-file PATH, or the environment variable
 FLEET_ENROLL_TOKEN. Prefer the environment or a file so the token stays out of the
-sudo log and the process list:
-  curl -fsSL HOST_URL/install.sh | sudo FLEET_ENROLL_TOKEN=... bash -s -- HOST_URL
+shell history and the process list (run as root, e.g. after su -):
+  curl -fsSL HOST_URL/install.sh | FLEET_ENROLL_TOKEN=... bash -s -- HOST_URL
 EOF
   exit 2
 }
@@ -90,7 +90,7 @@ fi
 
 # ------------------------------------------------------------- prerequisites
 # Everything that can fail is checked here, before the enroll token is used.
-[ "$(id -u)" = 0 ] || die "run as root (sudo bash install_worker.sh ...)"
+[ "$(id -u)" = 0 ] || die "run as root (su -, then run the install line again)"
 command -v python3 >/dev/null 2>&1 || die "python3 not found (apt-get install python3)"
 python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
   || die "python3 >= 3.11 required, found $(python3 --version 2>&1)"
@@ -101,7 +101,7 @@ for pkg in python3-psutil python3-numpy; do
   if ! dpkg -s "$pkg" >/dev/null 2>&1; then
     echo "installing $pkg (apt)"
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$pkg" >/dev/null \
-      || die "could not install $pkg; run: sudo apt-get install $pkg"
+      || die "could not install $pkg; run as root: apt-get install $pkg"
   fi
 done
 case "$HOST_URL" in
@@ -298,7 +298,7 @@ LogRateLimitBurst=30
 WantedBy=multi-user.target
 UNITEOF
 
-# The switch command (sudo fleet2 use v1|v2|status).
+# The switch command (fleet2 use v1|v2 as root, fleet2 status).
 cat > /usr/local/sbin/fleet2 <<'SWITCHEOF'
 __FLEET2_SWITCH__
 SWITCHEOF
@@ -309,8 +309,8 @@ if systemctl is-active --quiet "$V1_UNIT"; then
   echo
   echo "The v1 worker ($V1_UNIT) is running on this box, so fleet-v2 is installed but NOT started."
   echo "v1 is untouched. When you are ready: first disable this box in the v1 dashboard, then run"
-  echo "  sudo fleet2 use v2"
-  echo "and to go back:  sudo fleet2 use v1"
+  echo "  fleet2 use v2        (as root)"
+  echo "and to go back:  fleet2 use v1"
   echo "fleet-v2 worker $VERSION installed; state in $STATE_DIR"
   exit 0
 fi

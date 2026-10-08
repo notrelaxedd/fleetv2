@@ -45,6 +45,6 @@ def test_install_script_is_served_with_url_and_switch(client):
     text = client.get("/install.sh").text
     assert 'DEFAULT_HOST_URL="http://127.0.0.1:8090"' in text
     assert "__FLEET2_SWITCH__" not in text
-    assert "sudo fleet2 use v1|v2" in text
+    assert "fleet2 use v1|v2" in text and "sudo" not in text
     assert "Conflicts=fleet-worker.service" in text
     assert "/var/lib/fleet2" in text

@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
             token, expires = auth.create_enroll_token(conn)
             url = config.public_url
             print(f"token (single use, expires {expires:%Y-%m-%d %H:%M} UTC): {token}")
-            print(f"on the worker: curl -fsSL {url}/install.sh | sudo bash -s -- {url} {token} --name w<N>")
+            print(f"on the worker, as root (su -): curl -fsSL {url}/install.sh | bash -s -- {url} {token} --name w<N>")
         elif args.command == "workers":
             for row in conn.execute("SELECT id, name, enabled, last_heartbeat_at, cpu_pct, ram_pct, temp_c FROM workers ORDER BY name"):
                 print(json.dumps({k: (str(v) if v is not None else None) for k, v in row.items()}))

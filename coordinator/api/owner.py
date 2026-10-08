@@ -124,7 +124,7 @@ def enroll_token(conn: psycopg.Connection = DB, config: Config = Depends(get_con
     return jsonable({
         "token": token,
         "expires_at": expires_at,
-        "command": f"curl -fsSL {url}/install.sh | sudo bash -s -- {url} {token} --name w<N>",
+        "command": f"curl -fsSL {url}/install.sh | bash -s -- {url} {token} --name w<N>",  # run as root
     })
 
 
