@@ -374,3 +374,13 @@ def test_no_model_is_ranked_when_none_has_enough_trades(client, conn):
     html = client.get("/models").text
     assert re.findall(r'data-rank="(\d+)"', html) == []
     assert "No model has 100 trades on the held-out period yet, so none is ranked." in html
+
+
+def test_retired_models_are_never_ranked_and_come_last(client, conn):
+    models.store_backtest(conn, "momentum", metrics_with(0.9, 150), None)
+    models.store_backtest(conn, "dip_buy", metrics_with(0.1, 150), None)
+    conn.execute("UPDATE models SET status = 'retired' WHERE id = 'momentum'")
+    html = client.get("/models").text
+    assert page_ids(html)[-1] == "momentum"
+    assert re.findall(r'data-rank="(\d+)"', html) == ["1"]
+    assert page_ids(html)[0] == "dip_buy"

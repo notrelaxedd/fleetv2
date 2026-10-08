@@ -134,7 +134,8 @@ def list_row(m: dict[str, Any], held_out_starts: dict[str, Any] | None = None) -
         "roi": signed_pct(held.get("roi")) if held else "-",
         "roi_value": held.get("roi") if held else None,
         "tone": _tone(held.get("roi")) if held else "plain",
-        "enough_trades": enough and not stale,
+        "enough_trades": enough and not stale and m["status"] != "retired",
+        "retired": m["status"] == "retired",
         "not_enough": bool(held) and not enough,
         "stale": stale,
         "spark": _spark(held.get("curve") if held else None),
@@ -143,11 +144,13 @@ def list_row(m: dict[str, Any], held_out_starts: dict[str, Any] | None = None) -
 
 def ranked(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Ranked models (100+ held-out trades, current held-out period) first by ROI; then
-    the rest, unranked: not enough trades (by ROI), an old held-out period, untested.
+    the rest, unranked: not enough trades (by ROI), an old held-out period, untested,
+    and retired models last.
     Only ranked models get a rank number, so a model with under 100 trades is never
     ranked first, even when no model has enough trades yet."""
     def key(r: dict[str, Any]) -> tuple[int, float, str]:
-        group = 0 if r["enough_trades"] else 3 if r["roi_value"] is None else 2 if r["stale"] else 1
+        group = (0 if r["enough_trades"] else 4 if r["retired"] else 3 if r["roi_value"] is None
+                 else 2 if r["stale"] else 1)
         return (group, -(r["roi_value"] or 0.0), r["name"])
     out = sorted(rows, key=key)
     rank = 0
