@@ -20,6 +20,7 @@ from coordinator.data import make_bar_source
 from coordinator.futures_data import make_futures_source
 from coordinator.errors import QueueError
 from coordinator.limits import load_limits
+from fleet2.sim.topstep import load_rules
 from coordinator import models as starter_models
 
 log = logging.getLogger(__name__)
@@ -142,6 +143,7 @@ def create_app(config: Config, broker_status: BrokerStatus | None = None) -> Fas
     app = FastAPI(title="fleet-v2 coordinator", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.config = config
     app.state.limits = load_limits(config.limits_path)
+    app.state.topstep = load_rules(config.topstep_path)
     if broker_status is None:
         broker_status = BrokerStatus(make_broker(config, _live_confirmed(config)))
     app.state.broker_status = broker_status

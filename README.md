@@ -167,6 +167,71 @@ once on the held-out period it never saw. It repeats until you press Stop model 
 and keeps at most five found models per model file (the one with the lowest training
 score is dropped when a better one is found).
 
+## Topstep's rules (config/topstep.toml)
+
+Futures models are judged on what Topstep pays for, not on ROI. A simulator
+(`fleet2/sim/topstep.py`) replays a model's days through Topstep's Combine (the paid
+test) and then the Express Funded account (where payouts happen), starting from every
+day of a period. Every rule it uses is in `config/topstep.toml`. The starting values
+come from third-party summaries in October 2026 and **none has been checked against
+Topstep yet**: check each one at help.topstep.com and write the date in its "Last
+checked" line. Edit the file, then `docker compose restart coordinator`.
+
+What each number means:
+
+- **size** (50,000): the account balance you start with. All money below is in dollars.
+- **profit_target** (3,000): the Combine passes once the balance is this much above the
+  start.
+- **max_loss_limit** (2,000): the loss floor starts this far below the starting balance
+  (48,000). At the end of every day it moves up to the day's closing balance minus
+  2,000 if that is higher, never down, and it stops at the starting balance (50,000).
+  The floor is watched all day, open trades included: touch it once and the account
+  fails, even if the day ends green. Example: the balance closes at 50,500, so the floor
+  moves to 48,500; a loss the next day leaves it at 48,500.
+- **daily_loss_limit** (0, none): an optional Topstep add-on. With a number, a day that
+  falls that far ends at that loss.
+- **max_micro_contracts** (50): the most micro contracts at once. The simulator never
+  tests more.
+- **flat_by** (15:10 Chicago time): Topstep's deadline to be out of every trade. The
+  backtester is out by 15:00.
+- **consistency** (kind "target", best_day_share 0.5): no single day may be more than
+  half of the profit target ($1,500). Sources disagree: another says 55% of the total
+  profit (kind "total_profit", 0.55), where you keep trading until it holds. Set the one
+  Topstep uses now.
+- **payout_winning_days** (5) and **payout_min_day_profit** (150): in the Express Funded
+  account you may ask for a payout after 5 days of at least $150 profit each, counted
+  since the start or the last payout.
+- **payout_share_of_balance** (0.5): a payout is at most half of the profit in the
+  account.
+- **max_payout** (unset): the most one payout can be. Topstep caps it by account size and
+  "path"; the plan has no number, so fill it in.
+- **profit_split** (0.9): your share of each payout.
+- **floor_to_start_after_payout** (true): after a payout the loss floor moves up to the
+  starting balance.
+- **[fees]** (all unset): commission plus exchange fees per contract per side for MES and
+  MNQ, the Combine's monthly fee and the activation fee for the Express Funded account.
+  Until you fill them in, futures backtests and model search do not start, and the
+  dashboard says "Set the fee in config/topstep.toml" instead of a number.
+- **[costs] slippage_ticks** (1), **[simulator]** and **[ready]**: our own assumptions
+  (slippage, how long to play the Express Funded account, how many coin-flip twins,
+  and what "ready for a Combine" needs), not Topstep's rules.
+
+What the simulator reports for a model, at each contract size it tries:
+
+- **Pass rate**: of the Combine attempts that finished inside the period, the share that
+  passed. Attempts still going when the period ends are left out, not guessed.
+- **Median days to pass**: trading days from start to pass, for the attempts that
+  passed.
+- **Expected payout**: the average paid out per attempt in the Express Funded account
+  (played for at most 120 trading days).
+- **Expected net per attempt**: your share of that, minus the monthly Combine fees and
+  the activation fee. The best contract size is the one with the most.
+- **Coin-flip twin**: the same model with the same trade times but each trade's
+  direction decided by a coin. With a $3,000 target and a $2,000 limit, even a coin
+  passes now and then, so a model only counts when it clearly beats its twin.
+- Sizes stop where the model's worst stretch in training, times the size, would use
+  more than half the loss limit.
+
 ## Safety controls
 
 - **Pause all trading**: one button in the header. While paused no model places an
