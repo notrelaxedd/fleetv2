@@ -7,7 +7,15 @@ from __future__ import annotations
 
 from types import ModuleType
 
-REGISTRY: dict[str, ModuleType] = {}
+from fleet2.models.futures import gap_fade, opening_range, pullback, trend_day, vwap_revert
+
+REGISTRY: dict[str, ModuleType] = {
+    "opening_range": opening_range,
+    "vwap_revert": vwap_revert,
+    "trend_day": trend_day,
+    "gap_fade": gap_fade,
+    "pullback": pullback,
+}
 
 
 def get_module(name: str) -> ModuleType:

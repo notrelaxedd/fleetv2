@@ -167,6 +167,25 @@ once on the held-out period it never saw. It repeats until you press Stop model 
 and keeps at most five found models per model file (the one with the lowest training
 score is dropped when a better one is found).
 
+## Futures models
+
+Five model files under `fleet2/models/futures/`, each a well-known day-trading idea.
+That is deliberate: they are honest starting points, and whether any still works after
+costs is exactly what the fleet finds out.
+
+- **Opening range**: trades the first break above or below the range of the first 15
+  to 60 minutes.
+- **VWAP revert**: on quiet days, fades a price stretched far from the day's
+  volume-weighted average price.
+- **Trend day**: in the afternoon, trades in the direction of the first hour's move.
+- **Gap fade**: bets that part of a large overnight gap closes in the first hours
+  (skipped on days the contract rolled).
+- **Pullback**: in a strong intraday trend, buys short dips (or sells short rallies).
+
+Each can go long or short, decides on 1-, 3-, 5- or 15-minute bars, and has an optional
+stop and target in ticks; model search tries all of these. Every one passes the
+cut-off test (`tests/test_futures_cutoff.py`).
+
 ## Topstep's rules (config/topstep.toml)
 
 Futures models are judged on what Topstep pays for, not on ROI. A simulator
