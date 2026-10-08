@@ -1,0 +1,21 @@
+# fleet-v2 limits: the one file for money limits. Safe defaults; edit and restart the
+# coordinator (docker compose restart coordinator) to change them.
+#
+# Every order a model wants is checked against these on the coordinator before it is
+# placed. A worker can never raise them.
+
+[money]
+# Paper money each model starts with (dollars).
+starting_balance_per_model = 10000
+# Most a model may hold in one position (dollars).
+max_per_position = 1000
+# Most a model may have invested in total (dollars).
+max_per_model = 10000
+
+[safety]
+# Pause all trading when the account is down more than this percent on the day.
+daily_loss_limit_pct = 2.0
+
+[fleet]
+# A worker card turns amber at this CPU temperature (degrees C).
+hot_temp_c = 80

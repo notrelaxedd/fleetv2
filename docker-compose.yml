@@ -1,0 +1,41 @@
+# fleet-v2 on box1: Postgres plus the coordinator. Both publish on 127.0.0.1 only;
+# `tailscale serve` puts the dashboard on your tailnet (see README).
+# Names differ from v1 (fleet2-*, port 8090) so the two stacks never collide.
+name: fleet2
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fleet2
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fleet2}
+      POSTGRES_DB: fleet2
+    volumes:
+      - fleet2-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fleet2 -d fleet2"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  coordinator:
+    build: .
+    restart: unless-stopped
+    # .env holds the Alpaca keys; only this service reads it.
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://fleet2:${POSTGRES_PASSWORD:-fleet2}@db:5432/fleet2
+      FLEET_BIND: 0.0.0.0:8090
+    volumes:
+      # Edit config/limits.toml on box1 and `docker compose restart coordinator`.
+      - ./config:/app/config:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8090:8090"
+
+volumes:
+  fleet2-db:

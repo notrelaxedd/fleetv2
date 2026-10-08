@@ -177,4 +177,27 @@ built, and it is not on the trading path. v2 replaces that plan.
 - the pause switch, including an order arriving mid-pause
 - the queue: a dead worker's job is failed and can be re-queued
 
+### Future options, designed for now and built only when you ask
+- **Paid data:**
+  - Bars come in through one module (`coordinator/data.py`), and the feed is a
+    setting: `ALPACA_DATA_FEED=iex` (free, the default) or `sip` (Alpaca's paid
+    consolidated feed).
+  - Each bar set records which feed it came from, and backtests say so. A model is
+    never trained on one feed and ranked against another without the dashboard
+    saying so.
+  - No paid source gets switched on without your OK.
+- **Topstep (funded futures):**
+  - Every order goes through one broker interface (`coordinator/broker.py`), so a
+    Topstep broker can sit beside Alpaca later.
+  - Topstep trades CME futures through the TopstepX / ProjectX API. That means a
+    third market ("Futures") with contract sizes and its own account rules:
+    trailing max loss, daily loss limit, and possibly a session close time. Those
+    become extra safety checks for that account only.
+  - **To check with Topstep first:**
+    - Topstep's terms (quoted by third parties) say trading must originate from your
+      personal device, not a VPS. box1 at home is likely fine, but confirm it.
+    - The API is a separate paid subscription.
+    - Whether bots are allowed on Live Funded accounts is unclear.
+- **Nothing in stages 1-5 depends on either one.**
+
 ### Open questions (see chat)
