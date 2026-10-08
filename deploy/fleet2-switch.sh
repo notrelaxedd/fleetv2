@@ -5,8 +5,9 @@
 #   fleet2 status          which agent is running
 # Neither agent is uninstalled: both stay on disk with their identities.
 # Before `use v2`, disable this box in the v1 dashboard (and never switch a box that is
-# in v1's trade role); before `use v1`, disable it in the v2 dashboard (Fleet screen)
-# so no job is cut short. systemd's Conflicts= also stops the other agent if both are
+# in v1's trade role); before `use v1`, let its v2 job finish or cancel it, so no job is
+# cut short (a cut-short job shows as failed and can be run again on another worker).
+# systemd's Conflicts= also stops the other agent if both are
 # ever started.
 set -euo pipefail
 V1=fleet-worker.service
