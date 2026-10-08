@@ -1,0 +1,23 @@
+<dialog class="live-panel" id="live-panel" aria-labelledby="live-title" data-live-panel>
+  <div class="live-box">
+    <h2 id="live-title">Trading mode</h2>
+    <p class="live-mode" data-live="mode" data-state="paper">Checking the current mode...</p>
+    <ul class="live-checks" aria-label="Conditions for real money">
+      <li data-live-check="env" data-ok="false"><i class="mark" aria-hidden="true"></i><span>ALPACA_LIVE=true in .env on box1</span></li>
+      <li data-live-check="keys" data-ok="false"><i class="mark" aria-hidden="true"></i><span>Live Alpaca keys in .env</span></li>
+      <li data-live-check="confirmed" data-ok="false"><i class="mark" aria-hidden="true"></i><span>Your confirmation here</span></li>
+    </ul>
+    <p class="live-note muted small">The mode changes only when the coordinator restarts. It never switches by itself.</p>
+    <form class="live-form" data-live="confirm-form" hidden>
+      <input type="text" data-live="phrase" placeholder="Type TRADE REAL MONEY" aria-label="Type TRADE REAL MONEY to confirm" autocomplete="off" autocapitalize="characters" spellcheck="false">
+      <button type="submit" class="btn" data-action="live-confirm">Confirm live trading</button>
+    </form>
+    <div class="live-form" data-live="withdraw-form" hidden>
+      <button type="button" class="btn" data-action="live-withdraw">Withdraw confirmation</button>
+    </div>
+    <p class="live-reply" data-live="reply" role="status" aria-live="polite"></p>
+    <div class="live-actions">
+      <button type="button" class="btn" data-action="live-close">Close</button>
+    </div>
+  </div>
+</dialog>

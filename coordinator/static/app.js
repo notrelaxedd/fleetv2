@@ -175,6 +175,91 @@
     if (e.target.matches('[data-field="kind"]')) { showJob(); }
   });
 
+  // ===== Live trading panel =====
+  // The Trading mode pill opens a dialog; /api/live is fetched each time so it is current.
+  // Opening is delegated (the pill is swapped every 5 s); the dialog itself is never swapped.
+  function livePanel() { return $("#live-panel"); }
+  function liveEl(name) { return $('[data-live="' + name + '"]', livePanel()); }
+
+  function liveSay(text, ok) {
+    var line = liveEl("reply");
+    line.textContent = text || "";
+    line.dataset.tone = ok ? "ok" : "error";
+  }
+
+  function liveRender(s) {
+    var live = s.mode === "live";
+    var mode = liveEl("mode");
+    mode.textContent = live ? "Live trading: real money" : "Paper trading: no real money";
+    mode.dataset.state = live ? "live" : "paper";
+    var checks = { env: s.env_allows_live, keys: s.live_keys_present, confirmed: s.confirmed };
+    Object.keys(checks).forEach(function (k) {
+      var li = $('[data-live-check="' + k + '"]', livePanel());
+      li.dataset.ok = checks[k] ? "true" : "false";
+      li.setAttribute("aria-label", li.textContent.trim() + ": " + (checks[k] ? "yes" : "no"));
+    });
+    liveEl("confirm-form").hidden = !!s.confirmed;
+    liveEl("withdraw-form").hidden = !s.confirmed;
+    liveEl("phrase").placeholder = "Type " + (s.phrase || "TRADE REAL MONEY");
+  }
+
+  function liveLoad() {
+    return fetch("/api/live", { cache: "no-store" }).then(function (res) {
+      if (!res.ok) { throw new Error("status " + res.status); }
+      return res.json();
+    }).then(liveRender, function () {
+      liveEl("mode").textContent = "Cannot read the trading mode";
+      liveSay("Cannot reach the coordinator", false);
+    });
+  }
+
+  function liveOpen() {
+    var dlg = livePanel();
+    if (!dlg || dlg.open) { return; }
+    liveSay("", true);
+    liveEl("phrase").value = "";
+    if (typeof dlg.showModal === "function") { dlg.showModal(); } else { dlg.setAttribute("open", ""); }
+    liveLoad();
+  }
+
+  function liveClose() {
+    var dlg = livePanel();
+    if (dlg && dlg.open) { if (dlg.close) { dlg.close(); } else { dlg.removeAttribute("open"); } }
+  }
+
+  function liveSend(button, url, body) {
+    button.disabled = true;
+    return send(url, body).then(function (r) {
+      return liveLoad().then(function () { liveSay(r.message, r.ok); button.disabled = false; });
+    });
+  }
+
+  document.addEventListener("click", function (e) {
+    var button = e.target.closest("button[data-action]");
+    if (!button || button.disabled) { return; }
+    var action = button.dataset.action;
+    if (action === "open-live") { liveOpen(); }
+    else if (action === "live-close") { liveClose(); }
+    else if (action === "live-withdraw") { liveSend(button, "/api/live/withdraw"); }
+  });
+
+  document.addEventListener("submit", function (e) {
+    if (!e.target.matches('[data-live="confirm-form"]')) { return; }
+    e.preventDefault();
+    liveSend($('[data-action="live-confirm"]', e.target), "/api/live/confirm", { confirm: liveEl("phrase").value.trim() });
+  });
+
+  document.addEventListener("close", function (e) {
+    if (e.target.id !== "live-panel") { return; }
+    var pill = $('[data-action="open-live"]');
+    if (pill) { pill.focus(); }
+  }, true);
+
+  // A click on the dark backdrop (the dialog element itself) closes it too.
+  document.addEventListener("click", function (e) {
+    if (e.target.id === "live-panel") { liveClose(); }
+  });
+
   if (panel()) { showJob(); }
   setInterval(function () { if (!document.hidden) { refresh(); } }, REFRESH_MS);
   document.addEventListener("visibilitychange", function () { if (!document.hidden) { refresh(); } });

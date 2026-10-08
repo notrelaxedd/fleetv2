@@ -213,3 +213,34 @@ h2.section { font-size: 14px; font-weight: 700; letter-spacing: .04em; text-tran
   .chart text { font-size: 20px; }
   .mactions .btn { flex: 1 1 100%; }
 }
+
+/* ===== Live trading panel ===== */
+button.pill { font-family: var(--sans); background: transparent; color: var(--text); cursor: pointer; }
+button.pill:hover { border-color: var(--muted); }
+button.pill[data-state="live"] { color: var(--warn); }
+.live-panel { padding: 0; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); color: var(--text); width: min(480px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; }
+.live-panel::backdrop { background: rgba(0, 0, 0, .6); }
+.live-box { padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+.live-box h2 { margin: 0; font-size: 18px; }
+.live-box p { margin: 0; }
+.live-mode { font-weight: 700; color: var(--accent); }
+.live-mode[data-state="live"] { color: var(--warn); }
+.live-checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.live-checks li { display: flex; align-items: center; gap: 10px; }
+.live-checks .mark { flex: none; width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--border); display: inline-flex; align-items: center; justify-content: center; font-style: normal; font-weight: 700; font-size: 13px; color: var(--muted); }
+.live-checks .mark::before { content: "\2717"; }
+.live-checks li[data-ok="true"] .mark { color: #07140E; background: var(--accent); border-color: var(--accent); }
+.live-checks li[data-ok="true"] .mark::before { content: "\2713"; }
+.live-checks li[data-ok="false"] .mark { color: var(--loss); border-color: var(--loss); }
+.live-form { display: flex; flex-direction: column; gap: 10px; }
+.live-form[hidden] { display: none; }
+.live-form input { min-height: 44px; padding: 0 12px; font: 600 14px var(--mono); color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
+.live-form input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.live-reply { min-height: 1.4em; color: var(--text); }
+.live-reply[data-tone="error"] { color: var(--warn); }
+.live-actions { display: flex; justify-content: flex-end; }
+.live-panel .btn { min-height: 44px; }
+@media (max-width: 700px) {
+  .live-panel { width: 100vw; max-width: 100vw; margin: 0; top: auto; bottom: 0; border-radius: var(--radius) var(--radius) 0 0; max-height: 92vh; }
+  .live-actions .btn { width: 100%; }
+}
