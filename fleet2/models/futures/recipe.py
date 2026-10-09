@@ -105,6 +105,14 @@ SIGNALS: dict[str, dict[str, Any]] = {
         "space": {},
         "normal": False,
     },
+    "fvg": {
+        "plural": "fair value gap retests",
+        "title": "fair value gap retest",
+        "up": "the price dips back into a recent upward fair value gap and holds above its bottom",
+        "down": "the price rises back into a recent downward fair value gap and holds below its top",
+        "space": {"fvg_size": (0.02, 0.3, "float"), "fvg_bars": (3, 60, "int")},
+        "normal": True,
+    },
     "momentum": {
         "plural": "momentum",
         "title": "short-term momentum",
@@ -306,6 +314,44 @@ def _previous(x: np.ndarray, bars: Bars) -> np.ndarray:
     return np.where(bars.first, np.nan, np.r_[np.nan, x[:-1]])
 
 
+def fair_value_gaps(s: Any, bars: Bars, min_size: np.ndarray, max_bars: int) -> tuple[np.ndarray, np.ndarray]:
+    """Retests of the day's latest fair value gap, as (up, down) events per bar.
+
+    A fair value gap is a three-bar pattern within one day: an upward gap forms at bar k
+    when its low is above the high of bar k-2 (the zone between them is the gap); a
+    downward one when its high is below the low of bar k-2. Gaps smaller than
+    `min_size` are ignored. "up" at a later bar j: within `max_bars` bars of the latest
+    upward gap of the day, the price dips into that gap (low at or below its top) and
+    closes at or above its bottom, the gap not having been filled before (no low below
+    its bottom since it formed). "down" is the mirror image. Everything uses bars up to
+    j only (k <= j - 1, and the bars between k and j)."""
+    k = np.arange(bars.n, dtype=float)
+    high2, low2 = _bars_ago(s.high, 2, bars), _bars_ago(s.low, 2, bars)
+    with np.errstate(invalid="ignore"):
+        bull = (s.low - high2) > min_size
+        bear = (low2 - s.high) > min_size
+
+    def retest(formed: np.ndarray, top_at: np.ndarray, bottom_at: np.ndarray, rising: bool) -> np.ndarray:
+        top = f.latest_today(top_at, formed, bars)
+        bottom = f.latest_today(bottom_at, formed, bars)
+        since = k - f.latest_today(k, formed, bars)
+        # The extreme of the bars after the gap formed, up to the bar before this one.
+        extreme = np.full(bars.n, np.inf if rising else -np.inf)
+        for lag in range(1, max_bars + 1):
+            v = _bars_ago(s.low if rising else s.high, lag, bars)
+            use = (lag <= since - 1) & ~np.isnan(v)
+            extreme = np.where(use, (np.minimum if rising else np.maximum)(extreme, v), extreme)
+        with np.errstate(invalid="ignore"):
+            fresh = (since >= 1) & (since <= max_bars)
+            if rising:
+                return fresh & (extreme >= bottom) & (s.low <= top) & (s.close >= bottom)
+            return fresh & (extreme <= top) & (s.high >= bottom) & (s.close <= top)
+
+    up = retest(bull, s.low, high2, True)      # an upward gap: from the high of k-2 up to the low of k
+    down = retest(bear, low2, s.high, False)   # a downward gap: from the high of k up to the low of k-2
+    return up, down
+
+
 def _signal(r: dict[str, Any], s: Any, bars: Bars, p: dict[str, Any], normal: np.ndarray,
             ctx: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """(up, down, allowed): the signal's events, and the bars on which it may start a trade."""
@@ -343,6 +389,8 @@ def _signal(r: dict[str, Any], s: Any, bars: Bars, p: dict[str, Any], normal: np
         d = s.close - _bars_ago(s.close, int(p["momentum_bars"]), bars)
         size = float(p["momentum_size"]) * normal
         up, down = d > size, d < -size
+    elif name == "fvg":
+        up, down = fair_value_gaps(s, bars, float(p["fvg_size"]) * normal, int(p["fvg_bars"]))
     else:  # validate() makes this unreachable
         raise BadRecipe(f"unknown signal {name!r}")
     return up, down, allowed

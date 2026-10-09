@@ -12,7 +12,7 @@ from __future__ import annotations
 from types import ModuleType
 from typing import Any
 
-from fleet2.models.futures import gap_fade, opening_range, pullback, recipe, trend_day, vwap_revert
+from fleet2.models.futures import fair_value_gap, gap_fade, opening_range, pullback, recipe, trend_day, vwap_revert
 
 REGISTRY: dict[str, ModuleType] = {
     "opening_range": opening_range,
@@ -20,6 +20,7 @@ REGISTRY: dict[str, ModuleType] = {
     "trend_day": trend_day,
     "gap_fade": gap_fade,
     "pullback": pullback,
+    "fair_value_gap": fair_value_gap,
 }
 
 
