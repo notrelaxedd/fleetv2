@@ -30,6 +30,7 @@ import json
 import logging
 import re
 import threading
+import time
 import tomllib
 import urllib.error
 import urllib.parse
@@ -115,6 +116,10 @@ class _PastAvailableEnd(DatabentoError):
         self.end = end
 
 
+class _Busy(DatabentoError):
+    """A busy Databento (a 5xx answer) or a lost connection: worth another try."""
+
+
 _AVAILABLE_UP_TO = re.compile(r"available up to '([^']+)'")
 
 
@@ -142,12 +147,29 @@ class DatabentoSource:
 
     feed = "databento"
 
-    def __init__(self, key: str, opener: Callable[..., Any] | None = None, timeout: float = 120.0) -> None:
+    ATTEMPTS = 3  # a busy answer (500, 502, 503, 504) or a lost connection is tried again...
+    PAUSES = (5.0, 20.0)  # ...after these many seconds
+
+    def __init__(self, key: str, opener: Callable[..., Any] | None = None, timeout: float = 120.0,
+                 sleep: Callable[[float], None] = time.sleep) -> None:
         self._auth = "Basic " + base64.b64encode(f"{key}:".encode()).decode()
         self._open = opener or urllib.request.urlopen
         self._timeout = timeout
+        self._sleep = sleep
 
     def _post(self, path: str, fields: dict[str, str]) -> bytes:
+        for attempt in range(self.ATTEMPTS):
+            try:
+                return self._post_once(path, fields)
+            except _Busy as exc:
+                if attempt == self.ATTEMPTS - 1:
+                    raise DatabentoError(f"{exc} ({self.ATTEMPTS} tries). Press Load futures prices again later: "
+                                         "what is already downloaded is kept.") from None
+                log.warning("%s; trying again", exc)
+                self._sleep(self.PAUSES[min(attempt, len(self.PAUSES) - 1)])
+        raise AssertionError("unreachable")
+
+    def _post_once(self, path: str, fields: dict[str, str]) -> bytes:
         body = urllib.parse.urlencode(fields).encode()
         req = urllib.request.Request(f"{DATABENTO_URL}/{path}", data=body, method="POST",
                                      headers={"Authorization": self._auth, "Accept": "application/json",
@@ -163,9 +185,11 @@ class DatabentoSource:
             end = _available_end(detail) if exc.code == 422 and "data_end_after_available_end" in detail else None
             if end is not None:
                 raise _PastAvailableEnd(end) from None
+            if exc.code in (500, 502, 503, 504):
+                raise _Busy(f"Databento was busy and answered {exc.code}") from None
             raise DatabentoError(f"Databento answered {exc.code}: {detail[:300]}") from None
         except (urllib.error.URLError, OSError) as exc:
-            raise DatabentoError(f"Cannot reach Databento: {exc}") from None
+            raise _Busy(f"Cannot reach Databento: {exc}") from None
 
     def _fields(self, symbol: str, start: datetime, end: datetime) -> dict[str, str]:
         return {
@@ -402,9 +426,10 @@ def refresh_step(conn: psycopg.Connection, source: FuturesSource, symbol: str, c
                  now: datetime | None = None, after: datetime | None = None) -> dict[str, Any]:
     """One unit of refresh work: one window of at most 31 days of one symbol. Never raises.
 
-    Before a paid download it asks the source what bringing EVERY futures symbol up to
-    date would cost and refuses when that is above `cap_usd`, so the whole refresh run
-    can never spend more than the cap (later steps only cover what is left).
+    Before a symbol's first paid download (no `after`) it asks the source what bringing
+    EVERY futures symbol up to date would cost and refuses when that is above `cap_usd`,
+    so the whole refresh run can never spend more than the cap. The later steps of the
+    run (with `after`) only cover part of what was priced, so they are not priced again.
     Returns {"symbol", "market", "added", "bars", "last_ts", "done", "error", "from",
     "cursor", "feed", "cost_usd"}."""
     now = _utc(now) if now is not None else datetime.now(timezone.utc)
@@ -427,7 +452,9 @@ def refresh_step(conn: psycopg.Connection, source: FuturesSource, symbol: str, c
         if window_start >= now:
             return out
 
-        if source.feed == "databento":
+        if source.feed == "databento" and after is None:
+            # Priced once, at a symbol's first step: the later steps of the same run only
+            # cover part of what was priced here.
             total = 0.0
             for other in universe.FUTURES["symbols"]:
                 begin = window_start if other == symbol else _next_start(_stored(conn, other), source.feed)

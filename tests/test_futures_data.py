@@ -82,6 +82,7 @@ class FakeDatabento:
                  available_end: str | None = None) -> None:
         self.cost, self.rows, self.status = cost, rows or [], status
         self.available_end = available_end  # Databento's history ends here (e.g. "2026-10-09T02:00:00Z")
+        self.busy: list[int] = []  # answer these statuses first, one per request (e.g. [504, 504])
         self.requests: list[tuple[str, dict[str, list[str]], dict[str, str]]] = []
 
     def __call__(self, req, timeout=None):
@@ -91,6 +92,9 @@ class FakeDatabento:
         self.requests.append((req.full_url, fields, dict(req.header_items())))
         if self.status != 200:
             raise urllib.error.HTTPError(req.full_url, self.status, "no", {}, io.BytesIO(b'{"detail":"bad key"}'))
+        if self.busy:
+            page = b"<html><body><h1>504 Gateway Time-out</h1> The server didn't respond in time. </body></html>"
+            raise urllib.error.HTTPError(req.full_url, self.busy.pop(0), "busy", {}, io.BytesIO(page))
         if self.available_end and fields["end"][0] > self.available_end:
             # The answer Databento gave on box1, word for word apart from the times.
             shown = self.available_end.replace("T", " ").replace("Z", "+00:00")
@@ -125,7 +129,8 @@ class _Resp:
 
 def databento(cost=1.0, rows=None, status=200, available_end=None) -> tuple[fd.DatabentoSource, FakeDatabento]:
     fake = FakeDatabento(cost, rows, status, available_end)
-    return fd.DatabentoSource("db-test-key", opener=fake), fake
+    fake.pauses = []
+    return fd.DatabentoSource("db-test-key", opener=fake, sleep=fake.pauses.append), fake
 
 
 def csv_row(epoch: int, iid: int, o: float, h: float, l: float, c: float, v: int = 10) -> str:
@@ -189,6 +194,33 @@ def test_a_refresh_right_after_the_market_works_although_databento_is_behind(con
                  "VALUES ('MES', '1Min', '2026-10-07 19:59:00+00', 1, 1, 1, 1, 1, 'databento', 7)")
     r = fd.refresh_step(conn, src, "MES", cap_usd=10.0, now=now)
     assert r["error"] is None and r["added"] == 1 and r["done"]
+
+
+def test_a_busy_databento_is_tried_again_before_giving_up():
+    start, end = datetime(2024, 3, 1, tzinfo=UTC), datetime(2024, 4, 1, tzinfo=UTC)
+    src, fake = databento(cost=0.42)
+    fake.busy = [504, 502]
+    assert src.cost("MES", start, end) == pytest.approx(0.42)
+    assert len(fake.requests) == 3 and fake.pauses == [5.0, 20.0]
+
+    src, fake = databento()
+    fake.busy = [504, 504, 504]
+    with pytest.raises(fd.DatabentoError, match="busy and answered 504 .3 tries.*Press Load futures prices again"):
+        src.fetch("MES", start, end)
+    assert len(fake.requests) == 3
+
+
+def test_only_a_symbols_first_step_asks_what_the_download_costs(conn):
+    d = date(2019, 5, 6)
+    src, fake = databento(cost=0.5, rows=[csv_row(ct(d, 8, 30), 11, 2900, 2901, 2899, 2900.5)])
+    first = fd.refresh_step(conn, src, "MES", cap_usd=10.0, now=NOW)
+    assert first["error"] is None and first["cost_usd"] == 1.0
+    assert [u.rsplit("/", 1)[1] for u, _, _ in fake.requests] == ["metadata.get_cost"] * 2 + ["timeseries.get_range"]
+    fake.requests.clear()
+    after = datetime.fromisoformat(first["cursor"].replace("Z", "+00:00"))
+    later = fd.refresh_step(conn, src, "MES", cap_usd=10.0, now=NOW, after=after)
+    assert later["error"] is None and later["cost_usd"] == 0.0
+    assert [u.rsplit("/", 1)[1] for u, _, _ in fake.requests] == ["timeseries.get_range"]
 
 
 def test_the_available_end_is_read_in_every_time_format():
