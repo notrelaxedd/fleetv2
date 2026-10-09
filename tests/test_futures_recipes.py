@@ -167,3 +167,75 @@ def test_a_fair_value_gap_retest_is_found_from_past_bars_only():
     assert not big.any()
     gone = SimpleNamespace(high=s.high, low=np.array([99, 100, 101.0, 104, 105, 100.0, 103, 107.]), close=s.close)
     assert not R.fair_value_gaps(gone, bars, np.zeros(n), 10)[0][6]  # bar 5 went through the gap: bar 6 is no retest
+
+
+# ------------------------------------------------------------------ smart money, past-only
+
+
+def toy(high, low, close, open_=None, first=None):
+    from types import SimpleNamespace
+
+    high, low, close = (np.array(x, dtype=float) for x in (high, low, close))
+    n = len(high)
+    bars = SimpleNamespace(n=n, first=np.r_[True, np.zeros(n - 1, bool)] if first is None else np.array(first))
+    s = SimpleNamespace(high=high, low=low, close=close,
+                        open=close.copy() if open_ is None else np.array(open_, dtype=float))
+    return s, bars
+
+
+def test_a_swing_only_counts_once_the_bars_after_it_have_closed():
+    """Bar 2 is a swing high (above the 2 bars on each side); it is known at bar 4, not before."""
+    s, bars = toy(high=[10, 11, 15, 12, 11, 10, 9], low=[9, 10, 13, 11, 10, 9, 8], close=[9.5, 10.5, 14, 11.5, 10.5, 9.5, 8.5])
+    high_level, _, new_high, _ = R.confirmed_swings(s, bars, 2)
+    assert new_high.tolist() == [False] * 4 + [True, False, False]
+    assert np.isnan(high_level[:4]).all() and (high_level[4:] == 15).all()
+
+
+def test_breaks_of_structure_and_a_change_of_character():
+    """A swing low at bar 2 (known at bar 3) is broken by bar 4's close. A swing high at
+    bar 3 (known at bar 4) is broken by bar 5's close: against the last break, a change
+    of character. A swing high at bar 5 (known at bar 6) is broken by bar 8's close: the
+    same way as the last break. Bar 9 closes above it again: no second break."""
+    high = [12, 11, 10, 11, 9.5, 12, 11, 11.5, 13, 14]
+    low = [11, 10, 9, 10, 8.0, 11, 10, 10.5, 12, 13]
+    close = [11.5, 10.5, 9.5, 10.5, 8.5, 11.5, 10.5, 11, 12.8, 13.5]
+    s, bars = toy(high, low, close)
+    up, down, turned = R.structure_breaks(s, bars, 1)
+    assert down.tolist() == [False] * 4 + [True] + [False] * 5
+    assert up.tolist() == [False] * 5 + [True, False, False, True, False]
+    assert turned.tolist() == [False] * 5 + [True] + [False] * 4
+
+
+def test_an_order_block_retest_waits_for_the_break_and_the_pullback():
+    """Bar 3 falls (close below open) before bar 5 breaks above the swing high of bar 2;
+    bar 7 dips into bar 3's range (10..11.5) and closes inside: an upward retest."""
+    high = [10, 11, 12, 11.5, 11, 13, 13.5, 12.5, 14]
+    low = [9, 10, 11, 10.0, 10, 12, 12.5, 11.0, 13]
+    close = [9.5, 10.5, 11.5, 10.2, 10.5, 12.8, 13, 11.8, 13.8]
+    open_ = [9.2, 10.2, 11.2, 11.2, 10.3, 11.0, 12.8, 13.0, 12.0]
+    s, bars = toy(high, low, close, open_)
+    up, down = R.order_block_retests(s, bars, 1, 10)
+    assert up.tolist() == [False] * 7 + [True, False] and not down.any()
+
+
+def test_a_sweep_takes_yesterdays_low_and_closes_back_above_it():
+    """Day 1's low is 99; on day 2, bar 4 trades to 98 and closes at 100: an upward sweep."""
+    s, bars = toy(high=[101, 102, 101.5, 101, 100.5, 101], low=[99, 100, 100, 99.5, 98, 99.5],
+                  close=[100, 101, 101, 100, 100, 100.5], first=[True, False, False, True, False, False])
+    s.instrument = np.zeros(6, dtype=np.int64)
+    up, down = R.liquidity_sweeps(s, bars)
+    assert up.tolist() == [False] * 4 + [True, False] and not down.any()
+
+
+@pytest.mark.parametrize("setup", ["order_block", "choch", "sweep"])
+def test_every_smart_money_setup_trades_and_never_peeks(data, setup):
+    from fleet2.models.futures import smart_money
+
+    params = {**params_with_defaults(smart_money, None), "setup": setup}
+    bars, full = answers(data, smart_money, params)
+    assert np.count_nonzero(full) > 0
+    rng = np.random.default_rng(len(setup))
+    for t in [*rng.integers(1, data.n_minutes, 5), int(data.day_end[rng.integers(0, data.n_days)]) - 1]:
+        cut_bars, cut = answers(data.until_minute(int(t)), smart_money, params)
+        closed = int(np.count_nonzero(cut_bars.complete))
+        assert np.array_equal(cut[:closed], full[:closed]), f"{setup}: an answer before minute {t} changed"

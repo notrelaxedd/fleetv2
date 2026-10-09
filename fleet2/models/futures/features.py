@@ -107,6 +107,19 @@ def previous_close(series, bars: Bars) -> np.ndarray:
     return per_day[day_number(bars)]
 
 
+def previous_high_low(series, bars: Bars) -> tuple[np.ndarray, np.ndarray]:
+    """Per bar, the high and the low of the day before (NaN as for previous_close)."""
+    starts = np.flatnonzero(bars.first)
+    lasts = np.r_[starts[1:] - 1, bars.n - 1]
+    highs = np.maximum.reduceat(series.high, starts)
+    lows = np.minimum.reduceat(series.low, starts)
+    prev_iid = np.r_[-1, series.instrument[lasts[:-1]]]
+    same = prev_iid == series.instrument[starts]
+    day = day_number(bars)
+    return (np.where(same, np.r_[np.nan, highs[:-1]], np.nan)[day],
+            np.where(same, np.r_[np.nan, lows[:-1]], np.nan)[day])
+
+
 def day_open(series, bars: Bars) -> np.ndarray:
     """The open of the day's first bar."""
     return series.open[first_index(bars)]
