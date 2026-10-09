@@ -162,14 +162,20 @@ def run_final_check(params: dict[str, Any], checkpoint: dict[str, Any] | None, e
     result["contracts"] = size
     model_id = str(params["model_id"])
     body = {"job_id": params.get("_job_id"), "feed": data.feed, "result": result}
-    for attempt in range(3):
+    tries = []
+
+    def send() -> Any:
+        """The lockbox opens once, so its result is sent until it is stored."""
+        tries.append(1)
         try:
-            http.post_json(f"{ctx['host_url']}/api/v1/models/{model_id}/final-check", body,
-                           token=str(ctx["worker_token"]), timeout=30.0)
-            break
-        except http.HttpConnectionError:
-            if attempt == 2:
-                raise
+            return http.post_json(f"{ctx['host_url']}/api/v1/models/{model_id}/final-check", body,
+                                  token=str(ctx["worker_token"]), timeout=30.0)
+        except http.HttpError as exc:
+            if len(tries) > 1 and exc.status == 409 and "already stored" in exc.detail:
+                return None  # an earlier try got through; only its answer was lost
+            raise
+
+    http.with_retries(send)
     chosen = result["sizes"][size - 1]
     sim, twin = chosen["sim"], chosen["twin"]
 

@@ -100,11 +100,13 @@ def run_search(params: dict[str, Any], checkpoint: dict[str, Any] | None, emit: 
                 continue
             s, cand, train = best
             held = evaluate(data[market], name, cand, limits, split, held_out_fraction, should_stop, "held_out")
-            reply = http.post_json(f"{host}/api/v1/models", {
+            found_body = {
                 "job_id": params.get("_job_id"), "module": name, "params": cand, "train_score": s,
                 "seed": f"{seed}:{round_no}",
                 "metrics": {"train": train, "held_out": held, "split_t": int(data[market].times[split]),
                             "feed": data[market].feed, "params": cand, "market": market},
-            }, token=token, timeout=30.0)
+            }
+            reply = http.with_retries(lambda: http.post_json(f"{host}/api/v1/models", found_body, token=token,
+                                                             timeout=30.0), should_stop=should_stop)
             if isinstance(reply, dict) and reply.get("kept"):
                 kept_total += 1
