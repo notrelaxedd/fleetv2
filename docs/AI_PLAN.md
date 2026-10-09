@@ -58,7 +58,9 @@ the AI never sees a date or a price, and the backtester judges them on prices.
 - A library of building blocks, each a small numpy function of the bars so far:
   - signals: opening-range break, stretch from the day's average price (VWAP), short
     and long average cross, gap from yesterday's close, move from today's open, new
-    high or low of the day, momentum over the last few bars;
+    high or low of the day, momentum over the last few bars; later added: a retest of a
+    fair value gap, a break of structure, a change of character, an order block retest and
+    a sweep of yesterday's high or low;
   - each signal can be followed ("buy strength") or faded ("sell strength");
   - filters: quiet day, busy day, on the right side of VWAP, with the day's move,
     after a gap, after no gap;

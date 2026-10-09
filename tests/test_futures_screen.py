@@ -148,7 +148,7 @@ def test_ranked_by_held_out_net_and_only_when_beating_the_twin(client, conn, fee
     store(conn, "vwap_revert", shaped(0.50, 0.30, 100.0, twin_paid=1_000.0))  # its coin flip makes more money
     html = client.get("/models?market=futures").text
     ranks = dict(re.findall(r'data-model="([^"]+)" data-rank="(\d*)"', html))
-    assert ranks == {"pullback": "1", "gap_fade": "2", "trend_day": "", "vwap_revert": "", "opening_range": "", "fair_value_gap": ""}
+    assert ranks == {"pullback": "1", "gap_fade": "2", "trend_day": "", "vwap_revert": "", "opening_range": "", "fair_value_gap": "", "smart_money": ""}
     assert futures_ids(html)[:2] == ["pullback", "gap_fade"]
     rows = html.split("<li>")
     pull = next(r for r in rows if 'data-model="pullback"' in r)

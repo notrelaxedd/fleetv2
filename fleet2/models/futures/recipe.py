@@ -14,7 +14,7 @@ A recipe is a choice of blocks, never code:
 
 family(recipe) turns a recipe into an object that works like a model file (NAME,
 DESCRIPTION, HOW_IT_WORKS, DEFAULT_PARAMS, SEARCH_SPACE, targets...), so model search,
-the backtester and live trading use it exactly as they use the five files. Its name,
+the backtester and live trading use it exactly as they use the model files. Its name,
 "recipe_" plus a hash of the recipe, is the same wherever the recipe is rebuilt, and a
 model stores its recipe in its settings ("recipe"), so every job can rebuild it.
 
@@ -112,6 +112,38 @@ SIGNALS: dict[str, dict[str, Any]] = {
         "down": "the price rises back into a recent downward fair value gap and holds below its top",
         "space": {"fvg_size": (0.02, 0.3, "float"), "fvg_bars": (3, 60, "int")},
         "normal": True,
+    },
+    "bos": {
+        "plural": "structure breaks",
+        "title": "break of structure",
+        "up": "the price closes above the latest swing high, going on with the day's last break",
+        "down": "the price closes below the latest swing low, going on with the day's last break",
+        "space": {"swing_bars": (2, 10, "int")},
+        "normal": False,
+    },
+    "choch": {
+        "plural": "changes of character",
+        "title": "change of character",
+        "up": "the price closes above the latest swing high after the day's last break was downward",
+        "down": "the price closes below the latest swing low after the day's last break was upward",
+        "space": {"swing_bars": (2, 10, "int")},
+        "normal": False,
+    },
+    "order_block": {
+        "plural": "order block retests",
+        "title": "order block retest",
+        "up": "after an upward break of structure, the price dips back into the last falling bar before it and holds",
+        "down": "after a downward break of structure, the price rises back into the last rising bar before it and holds",
+        "space": {"swing_bars": (2, 10, "int"), "ob_bars": (3, 60, "int")},
+        "normal": False,
+    },
+    "sweep": {
+        "plural": "liquidity sweeps",
+        "title": "sweep of yesterday's high or low",
+        "up": "the price dips below yesterday's low and closes back above it",
+        "down": "the price pokes above yesterday's high and closes back below it",
+        "space": {},
+        "normal": False,
     },
     "momentum": {
         "plural": "momentum",
@@ -314,42 +346,142 @@ def _previous(x: np.ndarray, bars: Bars) -> np.ndarray:
     return np.where(bars.first, np.nan, np.r_[np.nan, x[:-1]])
 
 
+def _zone_retest(s: Any, bars: Bars, formed: np.ndarray, top_at: np.ndarray, bottom_at: np.ndarray,
+                 rising: bool, max_bars: int) -> np.ndarray:
+    """Retests of the day's latest zone, a zone being set at each bar where `formed` is
+    true, from bottom_at to top_at of that bar. For a rising zone (one the price is
+    expected to bounce up from), a retest at a later bar j: within `max_bars` bars of
+    the zone forming, the price dips into it (low at or below its top) and closes at or
+    above its bottom, with no low below its bottom since it formed. A falling zone is
+    the mirror image. Uses bars up to j only."""
+    k = np.arange(bars.n, dtype=float)
+    top = f.latest_today(top_at, formed, bars)
+    bottom = f.latest_today(bottom_at, formed, bars)
+    since = k - f.latest_today(k, formed, bars)
+    # The extreme of the bars after the zone formed, up to the bar before this one.
+    extreme = np.full(bars.n, np.inf if rising else -np.inf)
+    for lag in range(1, max_bars + 1):
+        v = _bars_ago(s.low if rising else s.high, lag, bars)
+        use = (lag <= since - 1) & ~np.isnan(v)
+        extreme = np.where(use, (np.minimum if rising else np.maximum)(extreme, v), extreme)
+    with np.errstate(invalid="ignore"):
+        fresh = (since >= 1) & (since <= max_bars)
+        if rising:
+            return fresh & (extreme >= bottom) & (s.low <= top) & (s.close >= bottom)
+        return fresh & (extreme <= top) & (s.high >= bottom) & (s.close <= top)
+
+
 def fair_value_gaps(s: Any, bars: Bars, min_size: np.ndarray, max_bars: int) -> tuple[np.ndarray, np.ndarray]:
     """Retests of the day's latest fair value gap, as (up, down) events per bar.
 
     A fair value gap is a three-bar pattern within one day: an upward gap forms at bar k
     when its low is above the high of bar k-2 (the zone between them is the gap); a
     downward one when its high is below the low of bar k-2. Gaps smaller than
-    `min_size` are ignored. "up" at a later bar j: within `max_bars` bars of the latest
-    upward gap of the day, the price dips into that gap (low at or below its top) and
-    closes at or above its bottom, the gap not having been filled before (no low below
-    its bottom since it formed). "down" is the mirror image. Everything uses bars up to
-    j only (k <= j - 1, and the bars between k and j)."""
-    k = np.arange(bars.n, dtype=float)
+    `min_size` are ignored. "up" at a later bar: a retest of the latest upward gap
+    (_zone_retest); "down" is the mirror image."""
     high2, low2 = _bars_ago(s.high, 2, bars), _bars_ago(s.low, 2, bars)
     with np.errstate(invalid="ignore"):
         bull = (s.low - high2) > min_size
         bear = (low2 - s.high) > min_size
-
-    def retest(formed: np.ndarray, top_at: np.ndarray, bottom_at: np.ndarray, rising: bool) -> np.ndarray:
-        top = f.latest_today(top_at, formed, bars)
-        bottom = f.latest_today(bottom_at, formed, bars)
-        since = k - f.latest_today(k, formed, bars)
-        # The extreme of the bars after the gap formed, up to the bar before this one.
-        extreme = np.full(bars.n, np.inf if rising else -np.inf)
-        for lag in range(1, max_bars + 1):
-            v = _bars_ago(s.low if rising else s.high, lag, bars)
-            use = (lag <= since - 1) & ~np.isnan(v)
-            extreme = np.where(use, (np.minimum if rising else np.maximum)(extreme, v), extreme)
-        with np.errstate(invalid="ignore"):
-            fresh = (since >= 1) & (since <= max_bars)
-            if rising:
-                return fresh & (extreme >= bottom) & (s.low <= top) & (s.close >= bottom)
-            return fresh & (extreme <= top) & (s.high >= bottom) & (s.close <= top)
-
-    up = retest(bull, s.low, high2, True)      # an upward gap: from the high of k-2 up to the low of k
-    down = retest(bear, low2, s.high, False)   # a downward gap: from the high of k up to the low of k-2
+    up = _zone_retest(s, bars, bull, s.low, high2, True, max_bars)      # from the high of k-2 up to the low of k
+    down = _zone_retest(s, bars, bear, low2, s.high, False, max_bars)   # from the high of k up to the low of k-2
     return up, down
+
+
+# Smart money concepts, rebuilt so that each is known on the bar it is used, never later:
+# a swing only counts once the bars after it have closed, and a break, an order block or
+# a sweep is only marked on the bar that completes it.
+
+
+def _max_since(x: np.ndarray, start: np.ndarray, bars: Bars) -> np.ndarray:
+    """Running maximum of x from the latest bar of the day where start is true (that bar
+    included) to this bar; NaN before the day's first such bar."""
+    n = bars.n
+    group = np.cumsum(start | bars.first).astype(np.int64)
+    order = np.argsort(x, kind="stable")
+    rank = np.empty(n, dtype=np.int64)
+    rank[order] = np.arange(n)
+    best = np.maximum.accumulate(group * n + rank) - group * n   # exact: whole numbers only
+    out = x[order][best]
+    seen = f.latest_today(np.ones(n), start, bars, before=0.0) > 0
+    return np.where(seen, out, np.nan)
+
+
+def _min_since(x: np.ndarray, start: np.ndarray, bars: Bars) -> np.ndarray:
+    return -_max_since(-x, start, bars)
+
+
+def confirmed_swings(s: Any, bars: Bars, n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """(high_level, low_level, new_high, new_low) per bar.
+
+    A swing high is a bar whose high is above the highs of the n bars after it and at
+    least the highs of the n bars before it, all on the same day. It is only known once
+    those n later bars have closed, so it is marked (new_high) n bars after the swing
+    itself. high_level is the latest swing high known so far today (NaN before one).
+    Swing lows are the mirror image."""
+    n = max(int(n), 1)
+    with np.errstate(invalid="ignore"):
+        def swing(x: np.ndarray, sign: float) -> tuple[np.ndarray, np.ndarray]:
+            y = sign * x
+            centre = _bars_ago(y, n, bars)
+            later = np.max([_bars_ago(y, lag, bars) for lag in range(0, n)], axis=0)
+            earlier = np.max([_bars_ago(y, lag, bars) for lag in range(n + 1, 2 * n + 1)], axis=0)
+            new = (centre > later) & (centre >= earlier) & ~np.isnan(earlier)
+            return sign * f.latest_today(centre, new, bars), new
+        high_level, new_high = swing(s.high, 1.0)
+        low_level, new_low = swing(s.low, -1.0)
+    return high_level, low_level, new_high, new_low
+
+
+def structure_breaks(s: Any, bars: Bars, n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(up, down, turned) per bar: a break of structure.
+
+    "up" at the first close above the latest swing high (confirmed_swings) since that
+    swing was confirmed; "down" at the first close below the latest swing low. "turned"
+    marks a break against the day's previous break (a change of character, CHoCH); any
+    other break goes on in the same direction (BOS)."""
+    k = np.arange(bars.n, dtype=float)
+    high_level, low_level, new_high, new_low = confirmed_swings(s, bars, n)
+    with np.errstate(invalid="ignore"):
+        since_high = k - f.latest_today(k, new_high, bars)
+        since_low = k - f.latest_today(k, new_low, bars)
+        best = _previous(_max_since(s.close, new_high, bars), bars)
+        worst = _previous(_min_since(s.close, new_low, bars), bars)
+        up = (s.close > high_level) & (since_high >= 1) & (best <= high_level)
+        down = (s.close < low_level) & (since_low >= 1) & (worst >= low_level)
+        up, down = up & ~down, down & ~up
+        before = _previous(f.latest_today(np.where(up, 1.0, -1.0), up | down, bars), bars)
+        turned = (up & (before == -1.0)) | (down & (before == 1.0))
+    return up, down, turned
+
+
+def order_block_retests(s: Any, bars: Bars, n: int, max_bars: int) -> tuple[np.ndarray, np.ndarray]:
+    """(up, down) per bar: retests of the day's latest order block.
+
+    When the price breaks structure upward, the order block is the last falling bar
+    (close below open) before the break, from its low to its high. "up" at a later bar:
+    the price dips back into that block and holds (_zone_retest). A downward break's
+    order block is the last rising bar before it; "down" is the mirror image."""
+    up_break, down_break, _ = structure_breaks(s, bars, n)
+    falling, rising = s.close < s.open, s.close > s.open
+    top_up = _previous(f.latest_today(s.high, falling, bars), bars)
+    bottom_up = _previous(f.latest_today(s.low, falling, bars), bars)
+    top_down = _previous(f.latest_today(s.high, rising, bars), bars)
+    bottom_down = _previous(f.latest_today(s.low, rising, bars), bars)
+    up = _zone_retest(s, bars, up_break & ~np.isnan(top_up), top_up, bottom_up, True, max_bars)
+    down = _zone_retest(s, bars, down_break & ~np.isnan(top_down), top_down, bottom_down, False, max_bars)
+    return up, down
+
+
+def liquidity_sweeps(s: Any, bars: Bars) -> tuple[np.ndarray, np.ndarray]:
+    """(up, down) per bar: a sweep of yesterday's low or high.
+
+    "up" when the price trades below the day before's low (where many stop orders sit)
+    and closes back above it on the same bar; "down" when it trades above the day
+    before's high and closes back below it."""
+    high, low = f.previous_high_low(s, bars)
+    with np.errstate(invalid="ignore"):
+        return (s.low < low) & (s.close > low), (s.high > high) & (s.close < high)
 
 
 def _signal(r: dict[str, Any], s: Any, bars: Bars, p: dict[str, Any], normal: np.ndarray,
@@ -391,6 +523,14 @@ def _signal(r: dict[str, Any], s: Any, bars: Bars, p: dict[str, Any], normal: np
         up, down = d > size, d < -size
     elif name == "fvg":
         up, down = fair_value_gaps(s, bars, float(p["fvg_size"]) * normal, int(p["fvg_bars"]))
+    elif name in ("bos", "choch"):
+        up, down, turned = structure_breaks(s, bars, int(p["swing_bars"]))
+        keep = turned if name == "choch" else ~turned
+        up, down = up & keep, down & keep
+    elif name == "order_block":
+        up, down = order_block_retests(s, bars, int(p["swing_bars"]), int(p["ob_bars"]))
+    elif name == "sweep":
+        up, down = liquidity_sweeps(s, bars)
     else:  # validate() makes this unreachable
         raise BadRecipe(f"unknown signal {name!r}")
     return up, down, allowed
