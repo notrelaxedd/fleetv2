@@ -21,6 +21,7 @@ from fleet2.common import http
 from fleet2.sim.control import JobStopped
 
 STEP_TIMEOUT = 90.0  # one step may wait in the coordinator's Alpaca rate limiter
+FUTURES_STEP_TIMEOUT = 600.0  # a futures step may wait out a busy Databento (tried 3 times)
 RETRIES = 3  # attempts per call for a 5xx answer or a lost connection
 RETRY_PAUSE = 1.5  # seconds before the second attempt, doubled before the third
 MAX_STEPS_PER_SYMBOL = 100  # crypto windows are 120 days; far more than any real history needs
@@ -54,9 +55,10 @@ def _parse(value: Any) -> datetime | None:
 
 def _call(url: str, token: str, body: dict[str, Any]) -> dict[str, Any]:
     """POST one step; a 5xx or a lost connection is retried, anything else is raised."""
+    timeout = FUTURES_STEP_TIMEOUT if body.get("market") == "futures" else STEP_TIMEOUT
     for attempt in range(RETRIES):
         try:
-            reply = http.post_json(url, body, token=token, timeout=STEP_TIMEOUT)
+            reply = http.post_json(url, body, token=token, timeout=timeout)
             return reply if isinstance(reply, dict) else {}
         except http.HttpConnectionError:
             if attempt == RETRIES - 1:
