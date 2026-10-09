@@ -7,7 +7,7 @@ import psycopg
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from coordinator import ai_ideas, auth, futures_models, models, search
+from coordinator import ai_ideas, ai_reviews, auth, futures_models, models, search
 from coordinator.errors import BadRequest
 from coordinator.api.deps import DB, bearer, require_owner
 from coordinator.api.limits import small_payload
@@ -118,6 +118,19 @@ def report_final_check(model_id: str, body: FinalCheckBody, token: str = Depends
     """A Final check's lockbox result, kept forever."""
     worker = auth.worker_for_token(conn, token)
     return futures_models.store_final_check(conn, model_id, worker["id"], body.model_dump())
+
+
+@owner_router.post("/{model_id}/review", status_code=201)
+def ask_review(model_id: str, request: Request, conn: psycopg.Connection = DB) -> dict[str, Any]:
+    """Ask Claude Haiku to review one futures model's results (advice only)."""
+    if not request.app.state.ai_key:
+        raise BadRequest("Add ANTHROPIC_API_KEY to .env on box1 first")
+    if not request.app.state.ai.review_enabled:
+        raise BadRequest("Reviews are turned off in config/ai.toml")
+    try:
+        return ai_reviews.request(conn, model_id, "owner")
+    except ValueError as exc:
+        raise BadRequest(str(exc)) from None
 
 
 @owner_router.post("/{model_id}/final-check", status_code=201)

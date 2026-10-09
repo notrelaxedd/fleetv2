@@ -24,86 +24,27 @@ from __future__ import annotations
 
 import json
 import logging
-import tomllib
-from dataclasses import dataclass, fields
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Callable
 
 import psycopg
 from psycopg.types.json import Jsonb
 
+from coordinator import haiku
+from coordinator.haiku import AiSettings, load_settings, month_spend, month_start  # noqa: F401 - used by callers
 from fleet2.models.futures import recipe as R
 
 log = logging.getLogger(__name__)
 
 FEATURE = "recipes"
-EFFORTS = ("low", "medium", "high")
 # The training numbers kept per recipe, and so the only numbers Haiku ever sees.
 TRAIN_KEYS = ("tried", "best_score", "passes", "days_traded", "pnl_double", "pnl_normal")
 HISTORY_BEST, HISTORY_RECENT = 25, 15
 
 
-@dataclass(frozen=True)
-class AiSettings:
-    monthly_cap_usd: float = 5.0
-    enabled: bool = True
-    model: str = "claude-haiku-5-5"
-    per_call: int = 4
-    queue: int = 8
-    calls_per_hour: int = 6
-    per_round: int = 3
-    effort: str = "low"
-    max_tokens: int = 8000
-    input_per_million: float = 0.10
-    output_per_million: float = 0.50
-
-    def cost(self, input_tokens: int, output_tokens: int) -> float:
-        return (input_tokens * self.input_per_million + output_tokens * self.output_per_million) / 1e6
-
-    def worst_cost(self, input_tokens: int) -> float:
-        """The most a call with this prompt can cost: its whole answer at max_tokens."""
-        return self.cost(input_tokens, self.max_tokens)
-
-
-def load_settings(path: Path) -> AiSettings:
-    """config/ai.toml (defaults when the file is missing)."""
-    if not Path(path).is_file():
-        return AiSettings()
-    with open(path, "rb") as fh:
-        raw = tomllib.load(fh)
-    flat: dict[str, Any] = {}
-    for section in ("spend", "recipes", "prices"):
-        flat.update(raw.get(section) or {})
-    known = {f.name for f in fields(AiSettings)}
-    s = AiSettings(**{k: v for k, v in flat.items() if k in known})
-    if s.effort not in EFFORTS:
-        raise ValueError(f"effort in {path} must be one of {', '.join(EFFORTS)}")
-    if min(s.monthly_cap_usd, s.input_per_million, s.output_per_million) < 0 or min(s.per_call, s.max_tokens) < 1:
-        raise ValueError(f"the numbers in {path} must be positive")
-    return s
-
-
-# ------------------------------------------------------------------ spend and when to call
-
-
-def month_start(now: datetime) -> datetime:
-    return now.astimezone(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-
-def month_spend(conn: psycopg.Connection, now: datetime | None = None) -> float:
-    now = now or datetime.now(timezone.utc)
-    row = conn.execute("SELECT coalesce(sum(cost_usd), 0) AS s FROM ai_calls WHERE at >= %s",
-                       (month_start(now),)).fetchone()
-    return float(row["s"])
-
-
 def record_call(conn: psycopg.Connection, model: str, input_tokens: int, output_tokens: int, cost: float,
-                outcome: str, detail: dict[str, Any] | None = None, at: datetime | None = None) -> None:
-    conn.execute("INSERT INTO ai_calls (at, feature, model, input_tokens, output_tokens, cost_usd, outcome, detail) "
-                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                 (at or datetime.now(timezone.utc), FEATURE, model, int(input_tokens), int(output_tokens), float(cost),
-                  outcome[:300], Jsonb(detail or {})))
+                outcome: str, detail: dict[str, Any] | None = None, at: datetime | None = None) -> int:
+    return haiku.record_call(conn, FEATURE, model, input_tokens, output_tokens, cost, outcome, detail, at)
 
 
 def futures_search_running(conn: psycopg.Connection) -> bool:
@@ -122,7 +63,7 @@ def why_not(conn: psycopg.Connection, settings: AiSettings, key: str, now: datet
     """Why Haiku should not write recipes now (None: it may)."""
     now = now or datetime.now(timezone.utc)
     if not key:
-        return "no ANTHROPIC_API_KEY in .env on box1"
+        return haiku.NO_KEY
     if not settings.enabled:
         return "turned off in config/ai.toml"
     if not futures_search_running(conn):
@@ -133,9 +74,7 @@ def why_not(conn: psycopg.Connection, settings: AiSettings, key: str, now: datet
                           (FEATURE, now)).fetchone()["n"]
     if recent >= settings.calls_per_hour:
         return f"{settings.calls_per_hour} calls this hour already"
-    if month_spend(conn, now) + settings.worst_cost(prompt_tokens) > settings.monthly_cap_usd:
-        return f"this month's cap of ${settings.monthly_cap_usd:,.2f} (monthly_cap_usd in config/ai.toml) is reached"
-    return None
+    return haiku.over_cap(conn, settings, prompt_tokens, settings.max_tokens, now)
 
 
 # ------------------------------------------------------------------ the prompt
@@ -245,70 +184,30 @@ def schema() -> dict[str, Any]:
 # ------------------------------------------------------------------ the call
 
 
-def make_client(key: str) -> Any:
-    import anthropic
-
-    return anthropic.Anthropic(api_key=key, max_retries=2, timeout=120.0)
-
-
 def _known(conn: psycopg.Connection) -> set[str]:
     rows = conn.execute("SELECT family AS name FROM recipe_ideas UNION SELECT module FROM models "
                         "WHERE market = 'futures'").fetchall()
     return {r["name"] for r in rows}
 
 
-def _error_text(exc: Exception) -> str:
-    status = getattr(exc, "status_code", None)
-    if status in (401, 403):
-        return "error: Anthropic refused ANTHROPIC_API_KEY in .env on box1"
-    if status is not None:
-        return f"error: Anthropic answered {status}"
-    return f"error: {type(exc).__name__}: {str(exc)[:200]}"
-
-
 def write_recipes(conn: psycopg.Connection, settings: AiSettings, key: str, client: Any = None,
-                  now: datetime | None = None, make: Callable[[str], Any] = make_client) -> dict[str, Any]:
+                  now: datetime | None = None, make: Callable[[str], Any] = haiku.make_client) -> dict[str, Any]:
     """One call to Haiku, when allowed: queue the good recipes it writes. Never raises for
     an API problem (it is recorded in ai_calls and shown on the dashboard)."""
     now = now or datetime.now(timezone.utc)
     user = prompt(conn, settings)
-    estimate = (len(SYSTEM) + len(user)) // 3 + 200  # generous: about 4 characters per token
-    reason = why_not(conn, settings, key, now, estimate)
+    reason = why_not(conn, settings, key, now, haiku.tokens_of(SYSTEM, user))
     if reason:
         return {"written": 0, "skipped": reason}
-    client = client or make(key)
-    try:
-        response = client.messages.create(
-            model=settings.model,
-            max_tokens=settings.max_tokens,
-            system=SYSTEM,
-            messages=[{"role": "user", "content": user}],
-            output_config={"effort": settings.effort, "format": {"type": "json_schema", "schema": schema()}},
-        )
-    except Exception as exc:  # noqa: BLE001 - recorded and shown, never crashes the coordinator
-        outcome = _error_text(exc)
-        record_call(conn, settings.model, 0, 0, 0.0, outcome, at=now)
-        log.warning("Claude Haiku recipes: %s", outcome)
-        return {"written": 0, "error": outcome}
-    usage = response.usage
-    in_tokens = int(getattr(usage, "input_tokens", 0) or 0) + int(getattr(usage, "cache_read_input_tokens", 0) or 0) \
-        + int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
-    out_tokens = int(getattr(usage, "output_tokens", 0) or 0)
-    cost = settings.cost(in_tokens, out_tokens)
-    if response.stop_reason == "refusal":
-        record_call(conn, settings.model, in_tokens, out_tokens, cost, "refused", at=now)
-        return {"written": 0, "error": "refused", "cost": cost}
-    if response.stop_reason == "max_tokens":
-        record_call(conn, settings.model, in_tokens, out_tokens, cost, "bad: the answer was cut off (max_tokens)", at=now)
-        return {"written": 0, "error": "cut off", "cost": cost}
-    text = next((b.text for b in response.content if getattr(b, "type", "") == "text"), "")
-    try:
-        items = json.loads(text)["recipes"]
-        if not isinstance(items, list):
-            raise ValueError("recipes is not a list")
-    except (ValueError, KeyError, TypeError) as exc:
-        record_call(conn, settings.model, in_tokens, out_tokens, cost, f"bad: unreadable answer ({exc})"[:120], at=now)
-        return {"written": 0, "error": "unreadable", "cost": cost}
+    answer = haiku.ask(conn, settings, key, FEATURE, SYSTEM, user, schema(), settings.effort, settings.max_tokens,
+                       client=client, now=now, make=make)
+    if answer["data"] is None:
+        return {"written": 0, "error": answer["outcome"], "cost": answer["cost"]}
+    items = answer["data"].get("recipes")
+    if not isinstance(items, list):
+        conn.execute("UPDATE ai_calls SET outcome = %s WHERE id = %s",
+                     ("bad: unreadable answer (no list of recipes)", answer["call_id"]))
+        return {"written": 0, "error": "unreadable", "cost": answer["cost"]}
     known = _known(conn)
     written: list[str] = []
     dropped: list[str] = []
@@ -328,9 +227,8 @@ def write_recipes(conn: psycopg.Connection, settings: AiSettings, key: str, clie
         conn.execute("INSERT INTO recipe_ideas (family, recipe, by, note) VALUES (%s, %s, 'haiku', %s)",
                      (name, Jsonb(r), note))
         written.append(name)
-    record_call(conn, settings.model, in_tokens, out_tokens, cost, "ok",
-                {"written": written, "dropped": dropped}, at=now)
-    return {"written": len(written), "names": written, "dropped": dropped, "cost": cost}
+    haiku.note_detail(conn, answer["call_id"], {"written": written, "dropped": dropped})
+    return {"written": len(written), "names": written, "dropped": dropped, "cost": answer["cost"]}
 
 
 # ------------------------------------------------------------------ what searches take and report
@@ -435,9 +333,8 @@ def status_line(conn: psycopg.Connection, settings: AiSettings, key: str, now: d
     if spent + settings.worst_cost(4000) > settings.monthly_cap_usd:
         text += " · stopped until next month (monthly_cap_usd in config/ai.toml)"
         tone = "warn"
-    last = conn.execute("SELECT outcome FROM ai_calls WHERE feature = %s ORDER BY id DESC LIMIT 1",
-                        (FEATURE,)).fetchone()
-    if last and last["outcome"].startswith(("error", "refused", "bad")):
-        text += f" · last call: {last['outcome']}"
+    problem = haiku.last_problem(conn, FEATURE)
+    if problem:
+        text += f" · last call: {problem}"
         tone = "warn"
     return {"tone": tone, "text": text}

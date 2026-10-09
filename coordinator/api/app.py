@@ -22,7 +22,7 @@ from coordinator.futures_trading import Venues
 from coordinator.topstep_broker import make_topstep
 from coordinator.errors import QueueError
 from coordinator.limits import load_limits
-from coordinator import ai_ideas
+from coordinator import ai_ideas, market_note
 from fleet2.sim.topstep import load_rules
 from coordinator import models as starter_models
 
@@ -149,6 +149,7 @@ def create_app(config: Config, broker_status: BrokerStatus | None = None) -> Fas
     app.state.topstep = load_rules(config.topstep_path)
     app.state.ai = ai_ideas.load_settings(config.ai_path)
     app.state.ai_key = config.anthropic_api_key
+    app.state.news = market_note.make_news(config)
     if broker_status is None:
         broker_status = BrokerStatus(make_broker(config, _live_confirmed(config)))
     app.state.broker_status = broker_status

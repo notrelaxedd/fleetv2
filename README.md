@@ -237,6 +237,27 @@ ANTHROPIC_API_KEY=sk-ant-...
   what it has cost against the cap, and the last problem if a call failed. A model whose
   recipe Haiku wrote says so on its page, with Haiku's one sentence on the idea.
 
+### Claude Haiku's reviews and daily market note
+
+With the same key, and within the same monthly cap:
+
+- **Reviews** (`coordinator/ai_reviews.py`). Each futures model's page has a "Claude
+  Haiku's review" card: a verdict word (promising, unclear or weak), what could be luck,
+  what looks fragile and what to watch on paper, written from the numbers on that page.
+  Reviews are **automatic** for models that beat their coin flip, have a Final check or
+  trade, whenever their results change (a new backtest, a Final check, five more paper
+  days). **Ask Claude Haiku for a review** asks for one on any tested model. At most 20
+  a day (`[reviews]` in `config/ai.toml`, where automatic reviews can be turned off).
+  Advice only: a review changes nothing, and the recipe writer never sees reviews.
+- **Market note** (`coordinator/market_note.py`), an experiment. On each trading day at
+  07:45 Chicago time, Haiku reads the headlines since the last close from Alpaca's news
+  feed (the Alpaca paper keys) and writes a short note on the Futures view: the day's
+  scheduled events, whether the news is quiet, normal or heavy, and a flag for an
+  unusual day. Haiku may remember past markets, so the note can only be tested going
+  forward: the Futures view compares futures paper results on flagged days with the
+  other days, counting only notes written before the open, and says when that rests on
+  too few days (under 40). Nothing trades on it.
+
 ## Futures on the Models screen
 
 ![Futures view](docs/screenshots/futures-models-desktop.png)

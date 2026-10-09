@@ -37,7 +37,7 @@ def main() -> None:
     if getattr(venues.topstep.client, "fake", False):
         venues.topstep.client.price_of = lambda symbol: _live_close(loop_pool, symbol) or 5000.0
     extra = make_tasks(status, app.state.limits, app.state.bar_source) + make_futures_tasks(
-        venues, app.state.topstep, app.state.limits) + make_ai_tasks(app.state.ai, config.anthropic_api_key)
+        venues, app.state.topstep, app.state.limits) + make_ai_tasks(app.state.ai, config.anthropic_api_key, app.state.topstep, app.state.news)
     loop = LoopThread(loop_pool, config.loop_seconds, extra=extra)
     loop.start()
     log.info("serving on %s (public url %s, dev=%s)", config.bind, config.public_url, config.dev)

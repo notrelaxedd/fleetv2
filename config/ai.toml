@@ -1,5 +1,6 @@
-# fleet-v2 AI settings: Claude Haiku writing recipes for futures model search
-# (docs/AI_PLAN.md). Edit on box1, then `docker compose restart coordinator`.
+# fleet-v2 AI settings: Claude Haiku writing recipes for futures model search, reviewing
+# futures models and writing a daily market note (docs/AI_PLAN.md). Edit on box1, then
+# `docker compose restart coordinator`.
 #
 # The key goes in .env on box1 (ANTHROPIC_API_KEY=...), read only by the coordinator.
 # Without a key nothing here runs and nothing is spent.
@@ -27,6 +28,32 @@ per_round = 3
 effort = "low"
 # The longest answer, thinking included, in tokens. Also what the cap check counts.
 max_tokens = 8000
+
+[reviews]
+# Claude Haiku reviews futures models: what could be luck, what looks fragile, what to
+# watch on paper. Advice only; it changes nothing.
+enabled = true
+# Automatic reviews of models that beat their coin flip, have a Final check or trade,
+# whenever their results change (a new backtest, a Final check, five more paper days).
+# With false, only the "Ask Claude Haiku for a review" button on a model's page.
+auto = true
+# At most this many reviews a day, automatic and asked-for together.
+per_day = 20
+effort = "low"
+max_tokens = 6000
+
+[market_note]
+# Before each session, Claude Haiku reads the headlines since the last close (Alpaca's
+# news feed, with the Alpaca paper keys) and writes a short note: the day's scheduled
+# events, how heavy the news is, and a flag for an unusual day. An experiment, tested
+# only going forward: see docs/AI_PLAN.md. Nothing trades on it.
+enabled = true
+# When to write it, Chicago time (the session opens at 08:30).
+time = "07:45"
+# At most this many headlines read.
+headlines = 60
+effort = "low"
+max_tokens = 4000
 
 [prices]
 # US dollars per million tokens for claude-haiku-5-5, for prompts up to 100,000 tokens

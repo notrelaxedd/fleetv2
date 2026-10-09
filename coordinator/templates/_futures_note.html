@@ -1,0 +1,21 @@
+{% set n = market_note %}
+{% if n %}
+<section class="mnotebox" aria-labelledby="h-note" data-market-note data-flagged="{{ 'true' if n.flagged else 'false' }}">
+  <h3 class="section" id="h-note">{{ n.title or "Market note" }}</h3>
+  {% if not n.on %}
+  <p class="muted small" data-note-off>{{ n.text }}</p>
+  {% else %}
+  {% if n.summary %}
+  <p class="small" data-note-summary>{% if n.flagged %}<span class="tag warn" data-note-flag>Flagged day</span> {% endif %}{{ n.summary }}</p>
+  {% if n.events %}<ul class="small notelist" data-note-events>{% for e in n.events %}<li>{% if e.time %}<span class="num">{{ e.time }}</span> {% endif %}{{ e.what }}</li>{% endfor %}</ul>{% endif %}
+  <p class="muted small" data-note-level>News: {{ n.level }}{% if n.reason %} · {{ n.reason }}{% endif %}</p>
+  <p class="muted small" data-note-written>{{ n.written }}</p>
+  {% else %}
+  <p class="muted small" data-note-none>{{ n.text }}</p>
+  {% endif %}
+  <p class="muted small" data-note-comparison>{{ n.comparison }}</p>
+  {% if n.problem %}<p class="small fnote" data-note-problem>{{ n.problem }}</p>{% endif %}
+  <p class="muted small">Advice only: nothing trades on it.</p>
+  {% endif %}
+</section>
+{% endif %}
