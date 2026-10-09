@@ -15,12 +15,17 @@ from __future__ import annotations
 import http.client
 import json
 import socket
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 DEFAULT_TIMEOUT = 4.0
+# Waits between tries of with_retries: about 8 minutes in all, long enough for the
+# coordinator to restart (a rebuild, a crash and its automatic restart).
+RETRY_PAUSES = (5.0, 15.0, 30.0, 60.0, 120.0, 240.0)
+_sleep = time.sleep
 
 
 class HttpError(Exception):
@@ -161,3 +166,31 @@ def post_json(url: str, body: Any, token: str | None = None, timeout: float = DE
 def get_bytes(url: str, token: str | None = None, timeout: float = 60.0) -> bytes:
     """GET a binary document (tarballs)."""
     return request_bytes("GET", url, token=token, timeout=timeout)
+
+
+def transient(exc: Exception) -> bool:
+    """No answer, a server error (5xx, such as 502 while the coordinator restarts) or
+    "too many requests" (429): worth trying again later."""
+    if isinstance(exc, HttpConnectionError):
+        return True
+    return isinstance(exc, HttpError) and (exc.status >= 500 or exc.status == 429)
+
+
+def with_retries(call: Callable[[], Any], pauses: tuple[float, ...] = RETRY_PAUSES,
+                 should_stop: Callable[[], bool] | None = None) -> Any:
+    """call(), tried again after each pause while it fails with a transient error; any
+    other error, or the last one, is raised. should_stop() ends the waiting early."""
+    for pause in (*pauses, None):
+        try:
+            return call()
+        except (HttpError, HttpConnectionError) as exc:
+            if pause is None or not transient(exc):
+                raise
+            waited = 0.0
+            while waited < pause:
+                if should_stop is not None and should_stop():
+                    raise
+                step = min(1.0, pause - waited)
+                _sleep(step)
+                waited += step
+    raise AssertionError("unreachable")

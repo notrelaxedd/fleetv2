@@ -177,8 +177,9 @@ def _valid(raw: Any) -> bool:
         return False
 
 
-def _kept(host: str, token: str) -> dict[str, list[dict[str, Any]]]:
-    rows = http.get_json(f"{host}/api/v1/models/kept?market=futures", token=token, timeout=30.0) or []
+def _kept(host: str, token: str, should_stop: Callable[[], bool] | None = None) -> dict[str, list[dict[str, Any]]]:
+    rows = http.with_retries(lambda: http.get_json(f"{host}/api/v1/models/kept?market=futures", token=token,
+                                                   timeout=30.0), should_stop=should_stop) or []
     out: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         out.setdefault(str(row["module"]), []).append({"id": str(row["id"]), "params": dict(row["params"])})
@@ -288,7 +289,7 @@ def run_futures_search(params: dict[str, Any], checkpoint: dict[str, Any] | None
                 if scorer is not None:
                     scorer.close()
                 scorer = Scorer(train, rules, processes)
-            kept = _kept(host, token)
+            kept = _kept(host, token, should_stop)
             if not with_recipes:  # another worker tunes the kept recipes
                 kept = {n: v for n, v in kept.items() if not recipe.is_recipe(n)}
             ideas = _ideas(host, token, params.get("_job_id"), ideas_per_round)
@@ -308,9 +309,12 @@ def run_futures_search(params: dict[str, Any], checkpoint: dict[str, Any] | None
                 t["n"] += 1
                 t["sum"] += sr
                 t["sq"] += sr * sr
-            http.post_json(f"{host}/api/v1/search/tries", {"job_id": params.get("_job_id"), "tries": tries,
-                                                           "recipes": recipe_results(results, names, idea_of)},
-                           token=token, timeout=30.0)
+            # Every call to the coordinator is tried again for a few minutes when it does
+            # not answer (a restart), so a long search is not lost to a short outage.
+            tried_body = {"job_id": params.get("_job_id"), "tries": tries,
+                          "recipes": recipe_results(results, names, idea_of)}
+            http.with_retries(lambda: http.post_json(f"{host}/api/v1/search/tries", tried_body, token=token,
+                                                     timeout=30.0), should_stop=should_stop)
             for name in names:
                 good = [r for r in results if r["name"] == name and r.get("passes") and (r.get("score") or 0) > 0]
                 if not good:
@@ -329,14 +333,16 @@ def run_futures_search(params: dict[str, Any], checkpoint: dict[str, Any] | None
                 result = futures_jobs.held_out_numbers(held, module, winner["params"], rules, periods,
                                                        trained["worst_stretch"], should_stop)
                 trained["neighbour_median"] = middle
-                reply = http.post_json(f"{host}/api/v1/models/futures", {
+                found_body = {
                     "job_id": params.get("_job_id"), "module": name, "params": winner["params"],
                     "train_score": winner["score"], "seed": winner["seed"], "parent": winner["parent"],
                     "idea_id": idea_of.get(name),
                     "metrics": {"market": "futures", "feed": held.feed, "periods": periods, "params": winner["params"],
                                 "train": trained, "held_out": result,
                                 "summary": futures_jobs.summary_line(trained, result)},
-                }, token=token, timeout=60.0)
+                }
+                reply = http.with_retries(lambda: http.post_json(f"{host}/api/v1/models/futures", found_body,
+                                                                 token=token, timeout=60.0), should_stop=should_stop)
                 if isinstance(reply, dict) and reply.get("kept"):
                     kept_total += 1
             emit({"round": round_no, "kept": kept_total, "tried": tried_total}, 1.0,

@@ -485,3 +485,74 @@ def test_a_worker_searches_only_its_share(monkeypatch, edge, periods):
     search(monkeypatch, FakeCache(edge, periods), coordinator, periods, rounds=1, new_recipes=2,
            files=["trend_day"], recipes=False)
     assert all(set(r) == {"trend_day"} for r in coordinator.tries)
+
+
+# ------------------------------------------------------------------ a coordinator that restarts
+
+
+def test_retries_wait_out_a_restart_but_not_a_refusal(monkeypatch):
+    from fleet2.common import http
+
+    waits = []
+    monkeypatch.setattr(http, "_sleep", waits.append)
+    answers = [http.HttpError(502, "", "u"), http.HttpConnectionError("refused"), {"ok": True}]
+
+    def call():
+        a = answers.pop(0)
+        if isinstance(a, Exception):
+            raise a
+        return a
+
+    assert http.with_retries(call, pauses=(2.0, 3.0, 4.0)) == {"ok": True} and sum(waits) == 5.0
+    with pytest.raises(http.HttpError, match="404"):  # a refusal is not tried again
+        http.with_retries(lambda: (_ for _ in ()).throw(http.HttpError(404, "no", "u")), pauses=(1.0,))
+    with pytest.raises(http.HttpError, match="503"):  # nor forever
+        http.with_retries(lambda: (_ for _ in ()).throw(http.HttpError(503, "", "u")), pauses=(1.0, 1.0))
+    waits.clear()
+    with pytest.raises(http.HttpError, match="502"):  # a stop ends the waiting
+        http.with_retries(lambda: (_ for _ in ()).throw(http.HttpError(502, "", "u")), pauses=(60.0,),
+                          should_stop=lambda: len(waits) >= 2)
+    assert sum(waits) == 2.0
+
+
+def test_a_search_carries_on_when_the_coordinator_restarts(monkeypatch, edge, periods):
+    """The 502 that ended w1's search after 2.5 hours: now waited out."""
+    from fleet2.common import http
+
+    monkeypatch.setattr(http, "_sleep", lambda s: None)
+    coordinator = Coordinator()
+    real = coordinator.post_json
+    down = {"tries": 2}
+
+    def flaky(url, body, token=None, timeout=None):
+        if url.endswith("/api/v1/search/tries") and down["tries"]:
+            down["tries"] -= 1
+            raise http.HttpError(502, "", url)
+        return real(url, body, token, timeout)
+
+    coordinator.post_json = flaky
+    search(monkeypatch, FakeCache(edge, periods), coordinator, periods, rounds=2)
+    assert not down["tries"] and len(coordinator.tries) == 2  # both rounds' tries arrived, once each
+
+
+def test_a_final_check_result_is_sent_until_it_is_stored(monkeypatch, full, periods):
+    """The first send is stored but its answer is lost; the second is refused as already
+    stored: the job still ends well, and the lockbox was opened once."""
+    from fleet2.common import http
+
+    monkeypatch.setattr(http, "_sleep", lambda s: None)
+    cache = FakeCache(full, periods)
+    monkeypatch.setattr(futures_jobs, "PriceCache", lambda ctx: cache)
+    calls = []
+
+    def post(url, body, token=None, timeout=None):
+        calls.append(url)
+        if len(calls) == 1:
+            raise http.HttpConnectionError("reset after sending")
+        raise http.HttpError(409, "A Final check result is already stored for this model", url)
+
+    monkeypatch.setattr(futures_jobs.http, "post_json", post)
+    params = {"_context": {"host_url": "http://h", "worker_token": "t"}, "_job_id": "j9", "model_id": "gap_fade",
+              "module": "gap_fade", "params": {}, "rules": RULES.to_dict(), "periods": periods, "contracts": 1}
+    out = futures_jobs.run_final_check(params, None, lambda *a: None, lambda: False)
+    assert len(calls) == 2 and cache.requested == ["lockbox"] and out["summary"].startswith("Final check")
