@@ -169,7 +169,7 @@ score is dropped when a better one is found).
 
 ## Futures models
 
-Five model files under `fleet2/models/futures/`, each a well-known day-trading idea.
+Six model files under `fleet2/models/futures/`, each a well-known day-trading idea.
 That is deliberate: they are honest starting points, and whether any still works after
 costs is exactly what the fleet finds out.
 
@@ -181,6 +181,9 @@ costs is exactly what the fleet finds out.
 - **Gap fade**: bets that part of a large overnight gap closes in the first hours
   (skipped on days the contract rolled).
 - **Pullback**: in a strong intraday trend, buys short dips (or sells short rallies).
+- **Fair value gap**: after a fast three-bar move leaves a gap (the third bar's low above
+  the first bar's high, or the mirror image), trades the first pullback into it in the
+  direction of the move, ignoring tiny gaps and ones already gone through.
 
 Each can go long or short, decides on 1-, 3-, 5- or 15-minute bars, and has an optional
 stop and target in ticks; model search tries all of these. Every one passes the
@@ -188,13 +191,13 @@ cut-off test (`tests/test_futures_cutoff.py`).
 
 ### Recipes: new ideas from building blocks
 
-Model search can only tune the settings of an idea, so besides the five files it also
+Model search can only tune the settings of an idea, so besides the six files it also
 tries **recipes** (`fleet2/models/futures/recipe.py`): models put together from building
 blocks, never from new code. A recipe picks:
 
 - one **signal**: opening-range break, stretch from VWAP, a short and a longer average
   of today's prices crossing, a gap from yesterday, a move from today's open, a new high
-  or low of the day, or short-term momentum. It can **follow** the signal or **fade** it;
+  or low of the day, a retest of a fair value gap, or short-term momentum. It can **follow** the signal or **fade** it;
 - up to two **filters**: a quiet day, a busy day, on the trade's side of VWAP or of the
   open, after a gap, or without one;
 - one **exit**: hold to the stop, target or close, out at a cross of VWAP, profit at
@@ -272,7 +275,7 @@ top it says where the futures prices come from ("proxy" when they are the SPY/QQ
 stand-in, "synthetic" in demo mode), with two buttons:
 
 - **Load futures prices** starts a Futures prices job (see "Futures prices").
-- **Start model search** searches the five futures model files and new recipes. It stays greyed out,
+- **Start model search** searches the six futures model files and new recipes. It stays greyed out,
   with "Set the fee in config/topstep.toml" under it, until the commissions are filled
   in there. One search runs at a time, stocks and crypto or futures.
 

@@ -1,4 +1,4 @@
-"""Futures models on the coordinator: the five starter files, what model search finds,
+"""Futures models on the coordinator: the starter model files, what model search finds,
 the count of settings tried, the jobs' parameters and the once-only Final check.
 
 Keeping a varied set (at most KEEP_PER_FILE found models per model file, and at most
@@ -43,7 +43,7 @@ ALIKE = 0.9  # daily P&L correlation above which two models count as the same id
 
 
 def sync_starters(conn: psycopg.Connection) -> int:
-    """The five futures model files as starter models with their default settings."""
+    """The futures model files as starter models with their default settings."""
     for name, module in REGISTRY.items():
         check_module(module)
         conn.execute(

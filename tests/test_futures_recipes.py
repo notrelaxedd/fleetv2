@@ -148,3 +148,22 @@ def test_most_recipes_trade(data):
     costs = fb.FuturesCosts(1.0, {"MES": 0.5, "MNQ": 0.5})
     trading = sum(fb.run(data, R.family(r), None, costs, first_day=30).n_trades > 0 for r in RECIPES)
     assert trading >= 0.6 * len(RECIPES), f"only {trading} of {len(RECIPES)} recipes traded"
+
+
+def test_a_fair_value_gap_retest_is_found_from_past_bars_only():
+    """An upward gap forms at bar 3 (its low 104 is above bar 1's high 101); bar 5 dips
+    back into the latest gap and closes inside it: that is the signal. A gap the price
+    has already gone through no longer counts."""
+    from types import SimpleNamespace
+
+    n = 8
+    bars = SimpleNamespace(n=n, first=np.r_[True, np.zeros(n - 1, bool)])
+    s = SimpleNamespace(high=np.array([100, 101, 101.5, 106, 107, 106.5, 108, 109.]),
+                        low=np.array([99, 100, 101.0, 104, 105, 103.0, 106, 107.]),
+                        close=np.array([100, 101, 101.5, 105, 106, 104.5, 107, 108.]))
+    up, down = R.fair_value_gaps(s, bars, np.zeros(n), 10)
+    assert up.tolist() == [False] * 5 + [True, False, False] and not down.any()
+    big = R.fair_value_gaps(s, bars, np.full(n, 10.0), 10)[0]  # gaps under 10 points are ignored
+    assert not big.any()
+    gone = SimpleNamespace(high=s.high, low=np.array([99, 100, 101.0, 104, 105, 100.0, 103, 107.]), close=s.close)
+    assert not R.fair_value_gaps(gone, bars, np.zeros(n), 10)[0][6]  # bar 5 went through the gap: bar 6 is no retest
