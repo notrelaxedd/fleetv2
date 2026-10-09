@@ -203,7 +203,9 @@ blocks, never from new code. A recipe picks:
 
 Every round of a futures search adds three new random recipes, each tried with a full
 set of settings, and keeps tuning the recipes of models already kept. At most 15 recipe
-models are kept at a time (a new find replaces the weakest when it scores higher), and
+models are kept at a time, and at most 3 of any one recipe (a new find replaces the
+closest of those 3, or the weakest of the 15, when it scores higher), so one good recipe
+cannot fill the list with variations of itself; and
 all recipe tries count together in the "chance this is luck" figure. A recipe model's
 page says so ("recipe put together by a random mix of building blocks"), and its
 description is written from its blocks.

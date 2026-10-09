@@ -9,8 +9,11 @@ see fleet2/models/futures/recipe.py):
   otherwise.
 - Otherwise, with fewer than KEEP_PER_FILE kept for its file it is kept; with that many
   it replaces the kept model with the closest settings, when it scores higher.
-- A recipe model is kept while fewer than KEEP_RECIPES are; with that many it replaces
-  the lowest-scoring recipe model, when it scores higher.
+- A recipe model is kept while its recipe has fewer than KEEP_PER_RECIPE kept models
+  (with that many it replaces the one with the closest settings, when it scores
+  higher), and while fewer than KEEP_RECIPES recipe models are kept in all (with that
+  many it replaces the lowest-scoring one, when it scores higher). So one good recipe
+  cannot fill every place with variations of itself.
 Training scores decide; held-out results never do (they are for ranking).
 
 No order is ever placed for a futures model: they cannot paper trade (trading.start
@@ -18,6 +21,7 @@ refuses), and nothing here talks to a broker.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import numpy as np
@@ -30,8 +34,11 @@ from fleet2.models.futures import REGISTRY, module_for, recipe
 from fleet2.models.futures.base import check_module, params_with_defaults
 from fleet2.sim import topstep
 
+log = logging.getLogger(__name__)
+
 KEEP_PER_FILE = 5
 KEEP_RECIPES = 15
+KEEP_PER_RECIPE = 3
 ALIKE = 0.9  # daily P&L correlation above which two models count as the same idea
 
 
@@ -49,7 +56,36 @@ def sync_starters(conn: psycopg.Connection) -> int:
             """,
             (name, module.NAME, name, module.DESCRIPTION, module.HOW_IT_WORKS, Jsonb(module.DEFAULT_PARAMS)),
         )
+    trim_recipes(conn)
     return len(REGISTRY)
+
+
+def trim_recipes(conn: psycopg.Connection) -> list[str]:
+    """Retire the kept models of a recipe beyond its KEEP_PER_RECIPE best (by training
+    score), as the keep rules would have. A model that is trading or has a Final check
+    is never retired. Returns the retired ids."""
+    rows = conn.execute(
+        """
+        SELECT m.id, m.module, (m.metrics->>'train_score')::float AS score,
+               EXISTS (SELECT 1 FROM futures_books b WHERE b.model_id = m.id AND b.status IN ('active', 'closing'))
+               OR EXISTS (SELECT 1 FROM final_checks f WHERE f.model_id = m.id) AS keep
+          FROM models m
+         WHERE m.market = 'futures' AND m.origin = 'search' AND m.status = 'backtested'
+           AND starts_with(m.module, 'recipe_')
+        """).fetchall()
+    by: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        by.setdefault(r["module"], []).append(r)
+    retired: list[str] = []
+    for family in by.values():
+        family.sort(key=lambda r: (not r["keep"], -(r["score"] if r["score"] is not None else float("-inf"))))
+        for r in family[KEEP_PER_RECIPE:]:
+            if not r["keep"]:
+                retired.append(r["id"])
+    if retired:
+        conn.execute("UPDATE models SET status = 'retired' WHERE id = ANY(%s)", (retired,))
+        log.info("retired %d extra model(s) of recipes with more than %d kept", len(retired), KEEP_PER_RECIPE)
+    return retired
 
 
 # ------------------------------------------------------------------ jobs
@@ -158,7 +194,14 @@ def store_found(conn: psycopg.Connection, worker_id: str | None, body: dict[str,
             break
     if replace is None and recipe.is_recipe(name):
         recipes = [k for k in kept if recipe.is_recipe(k["module"])]
-        if len(recipes) >= KEEP_RECIPES:
+        same = [k for k in recipes if k["module"] == name]
+        if len(same) >= KEEP_PER_RECIPE:
+            closest = min(same, key=lambda k: distance(module, params, k["params"]))
+            if closest["score"] is not None and closest["score"] >= score:
+                return {"kept": False, "reason": f"not better than the closest kept model of this recipe, "
+                                                 f"{closest['name']}"}
+            replace = closest
+        elif len(recipes) >= KEEP_RECIPES:
             weakest = min(recipes, key=lambda k: k["score"] if k["score"] is not None else float("-inf"))
             if weakest["score"] is not None and weakest["score"] >= score:
                 return {"kept": False, "reason": f"not better than the weakest of {KEEP_RECIPES} kept recipe models, "
