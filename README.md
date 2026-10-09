@@ -65,6 +65,8 @@ Where the prices come from:
   MNQ up to date will cost, and refuses when that is more than `max_download_usd` in
   `config/topstep.toml` (10 dollars to start; raise it yourself if a first full download
   costs more). A refused download says the price and changes nothing.
+  Databento's pay-as-you-go history stops about a day before now (the latest day needs
+  a live-data license), so the futures prices end there; research only needs whole past days.
 - **Proxy** (free), when there is no Databento key: SPY and QQQ 1-minute bars from Alpaca
   (your paper keys) standing in for MES and MNQ, scaled to about index points. Good for
   building and testing; the dashboard labels it "proxy" everywhere, and it can never

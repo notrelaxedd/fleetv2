@@ -83,6 +83,7 @@ class FakeDatabento:
         self.cost, self.rows, self.status = cost, rows or [], status
         self.available_end = available_end  # Databento's history ends here (e.g. "2026-10-09T02:00:00Z")
         self.busy: list[int] = []  # answer these statuses first, one per request (e.g. [504, 504])
+        self.licensed_until: str | None = None  # later prices need a live-data license (e.g. "2026-10-08T18:37:54.511021000Z")
         self.requests: list[tuple[str, dict[str, list[str]], dict[str, str]]] = []
 
     def __call__(self, req, timeout=None):
@@ -105,6 +106,14 @@ class FakeDatabento:
                            f"('{asked}') is after the available range. Try requesting with an earlier `end`.",
                 "status_code": 422, "docs": "https://databento.com/docs/api-reference-historical/basics/datasets",
                 "payload": None}}).encode()
+            raise urllib.error.HTTPError(req.full_url, 422, "Unprocessable", {}, io.BytesIO(body))
+        if self.licensed_until and fields["end"][0] > self.licensed_until:
+            # The answer Databento gave on box1 for the last day of prices, word for word.
+            body = json.dumps({"detail": {
+                "case": "dataset_unavailable_range",
+                "message": "Part or all of your request for dataset 'GLBX.MDP3' requires a subscription and/or "
+                           f"license to access. Try again with an end time before {self.licensed_until}.",
+                "status_code": 422, "docs": "https://databento.com/pricing#cme", "payload": None}}).encode()
             raise urllib.error.HTTPError(req.full_url, 422, "Unprocessable", {}, io.BytesIO(body))
         if req.full_url.endswith("metadata.get_cost"):
             body = json.dumps(self.cost).encode()
@@ -223,9 +232,27 @@ def test_only_a_symbols_first_step_asks_what_the_download_costs(conn):
     assert [u.rsplit("/", 1)[1] for u, _, _ in fake.requests] == ["timeseries.get_range"]
 
 
+def test_the_last_day_needs_a_license_so_the_download_stops_before_it(conn):
+    d = date(2026, 10, 7)
+    src, fake = databento(cost=0.5, rows=[csv_row(ct(d, 8, 30), 7, 6700.0, 6701.0, 6699.0, 6700.5)],
+                          available_end="2026-10-09T02:00:00Z")
+    fake.licensed_until = "2026-10-08T18:37:54.511021000Z"
+    now = datetime(2026, 10, 9, 2, 4, 38, tzinfo=UTC)
+    conn.execute("INSERT INTO bars (symbol, timeframe, ts, open, high, low, close, volume, feed, instrument_id) "
+                 "VALUES ('MES', '1Min', '2026-10-06 19:59:00+00', 1, 1, 1, 1, 1, 'databento', 7)")
+    r = fd.refresh_step(conn, src, "MES", cap_usd=10.0, now=now)
+    assert r["error"] is None and r["added"] == 1 and r["done"]
+    ends = [f["end"][0] for u, f, _ in fake.requests if u.endswith("timeseries.get_range")]
+    assert ends == ["2026-10-09T02:04:38Z", "2026-10-09T02:00:00Z", "2026-10-08T18:37:00Z"]
+
+
 def test_the_available_end_is_read_in_every_time_format():
     assert fd._available_end("has data available up to '2026-10-09 02:00:00+00:00'.") == datetime(2026, 10, 9, 2, tzinfo=UTC)
     assert fd._available_end("has data available up to '2026-10-09T02:00:00.123456789Z'") == datetime(2026, 10, 9, 2, 0, 0, 123456, tzinfo=UTC)
+    assert fd._available_end("Try again with an end time before 2026-10-08T18:37:54.511021000Z.") == \
+        datetime(2026, 10, 8, 18, 37, tzinfo=UTC)
+    assert fd._available_end("Try again with an end time before 2026-10-08T18:37:00Z.") == \
+        datetime(2026, 10, 8, 18, 36, tzinfo=UTC)
     assert fd._available_end("something else") is None
 
 
