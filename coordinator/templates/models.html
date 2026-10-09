@@ -3,7 +3,7 @@
 {% block content %}
 <h1 class="sr-only">Models</h1>
 <div class="models{% if not models %} no-models{% endif %}" data-models-screen data-selected-id="{{ selected.id if selected else '' }}" data-market="{{ 'futures' if view == 'futures' else '' }}">
-  <section class="models-side" aria-label="All models">
+  <section class="models-side" id="all-models" aria-label="All models">
     <nav class="mtabs" aria-label="Markets">
       <a href="/models" data-tab="stocks"{% if view != "futures" %} class="current" aria-current="page"{% endif %}>Stocks and crypto</a>
       <a href="/models?market=futures" data-tab="futures"{% if view == "futures" %} class="current" aria-current="page"{% endif %}>Futures</a>
@@ -18,6 +18,7 @@
 
   {% if selected %}
   <section class="model-detail" aria-label="Selected model" data-model-detail data-model-id="{{ selected.id }}">
+    <a class="mback" href="#all-models">&uarr; All models</a>
     <div data-region="model-head">{% include parts.head %}</div>
     <div data-region="model-actions">{% include parts.actions %}</div>
     <p class="confirm" data-reply="model" role="status" aria-live="polite"></p>

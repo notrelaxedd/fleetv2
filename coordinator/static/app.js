@@ -286,6 +286,13 @@
     if (e.target.id === "live-panel") { liveClose(); }
   });
 
+  // On a phone the Models screen is one column with the details below the whole list, so a
+  // tapped model opens scrolled to its details instead of at the top of the list.
+  var opened = $("[data-model-detail]");
+  if (opened && /[?&]id=/.test(location.search) && window.matchMedia("(max-width: 900px)").matches) {
+    opened.scrollIntoView({ block: "start" });
+  }
+
   if (panel()) { showJob(); }
   setInterval(function () { if (!document.hidden) { refresh(); } }, REFRESH_MS);
   document.addEventListener("visibilitychange", function () { if (!document.hidden) { refresh(); } });
