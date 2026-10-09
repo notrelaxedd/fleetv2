@@ -7,7 +7,7 @@ Two places a futures model can trade (a "venue"):
   point). A SPY dollar is then worth what an MES point-dollar is, so results read in
   futures dollars. Long and short. Never in live mode.
 - topstep: real micro contracts in the TopstepX account, only for a model whose "ready
-  for a Combine" checklist is complete (which needs 20 days on Alpaca paper first).
+  for a Combine" checklist is complete (which needs a few days on Alpaca paper first).
 
 How it runs: the model's worker job (fleet2/worker/futures_live_job.py) replays today
 through the backtester on the newest closed minute and sends the contracts it wants

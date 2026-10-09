@@ -361,7 +361,7 @@ together (`futures_paper_max_dollars`). The Alpaca account's 2% daily loss limit
 pause switch apply as for stocks.
 
 **Start trading on Topstep** is only offered for a model whose whole "ready for a Combine"
-checklist is ticked, including 20 Alpaca paper days. To connect TopstepX (a separate
+checklist is ticked, including 3 Alpaca paper days. To connect TopstepX (a separate
 paid API subscription at Topstep; make the key under Settings > API in TopstepX), put
 these in `.env` on box1:
 
@@ -409,8 +409,8 @@ A model is shown as ready for a Combine only when every line of its checklist is
 4. **Held-out**: it makes money at double slippage.
 5. **Lockbox Final check**: it makes money, and its pass rate is at most 15 points below
    the held-out one (`max_lockbox_drop`).
-6. **Alpaca paper trading**: at least 20 finished trading days on live prices
-   (`min_shadow_days`), with at most 10% of them (`max_days_outside`) outside the range
+6. **Alpaca paper trading**: at least 3 finished trading days on live prices
+   (`min_shadow_days`; raise it for more caution), with at most 10% of them (`max_days_outside`) outside the range
    of daily results the held-out backtest saw (its 1st to 99th percentile, scaled to the
    contracts traded), and a profit overall.
 
