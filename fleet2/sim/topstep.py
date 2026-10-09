@@ -78,7 +78,7 @@ class Rules:
     sizing_share: float = 0.5
     min_pass_rate_edge: float = 0.10
     max_lockbox_drop: float = 0.15
-    min_shadow_days: int = 20
+    min_shadow_days: int = 3
     max_days_outside: float = 0.10
     max_download_usd: float = 0.0
     account_start_balance: float = 50_000.0
@@ -184,7 +184,7 @@ def load_rules(path: Path) -> Rules:
         sizing_share=_number(sim, "sizing_share", f"{where} [simulator]", 0.01, 1.0, default=0.5),
         min_pass_rate_edge=_number(ready, "min_pass_rate_edge", f"{where} [ready]", 0, 1, default=0.10),
         max_lockbox_drop=_number(ready, "max_lockbox_drop", f"{where} [ready]", 0, 1, default=0.15),
-        min_shadow_days=_number(ready, "min_shadow_days", f"{where} [ready]", 0, 1000, default=20, integer=True),
+        min_shadow_days=_number(ready, "min_shadow_days", f"{where} [ready]", 0, 1000, default=3, integer=True),
         max_days_outside=_number(ready, "max_days_outside", f"{where} [ready]", 0, 1, default=0.10),
         max_download_usd=_number(doc.get("data") or {}, "max_download_usd", f"{where} [data]", 0, 1e6, default=0.0),
         account_start_balance=_number(live, "account_start_balance", f"{where} [live]", 0, 1e7, default=50_000.0),

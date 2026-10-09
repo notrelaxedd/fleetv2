@@ -8,9 +8,9 @@ and the screen says why. A model tested under other Topstep rules than the curre
 file's is not ranked until it is backtested again.
 
 "Ready for a Combine" needs every item of the checklist: real (Databento) prices, the
-held-out tests, the once-only lockbox Final check, and 20 days of shadow trading on
-live prices. Shadow trading is not built yet, so no model is ready in this build, and a
-model tested on proxy prices can never be.
+held-out tests, the once-only lockbox Final check, and a few days of Alpaca paper trading on
+live prices (min_shadow_days in config/topstep.toml). A model tested on proxy prices can
+never be ready.
 """
 from __future__ import annotations
 

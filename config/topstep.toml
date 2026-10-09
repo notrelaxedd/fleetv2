@@ -144,8 +144,10 @@ sizing_share = 0.5
 min_pass_rate_edge = 0.10
 # Lockbox: the pass rate may fall at most this much below the held-out one.
 max_lockbox_drop = 0.15
-# Alpaca paper trading on live prices: at least this many trading days...
-min_shadow_days = 20
+# Alpaca paper trading on live prices: at least this many trading days (3 checks that live
+# trading works and matches the backtest; it is no proof of profit, which comes from the
+# held-out and lockbox tests)...
+min_shadow_days = 3
 # ...with at most this share of days outside the held-out backtest's range of daily
 # results (its 1st to 99th percentile, scaled to the contracts traded), and a profit.
 max_days_outside = 0.10

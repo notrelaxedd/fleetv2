@@ -273,7 +273,7 @@ def test_paper_days_are_compared_with_the_backtests_range(conn):
     assert rec == {"days": 25, "total": 700.0 + 24 * 50.0, "outside": 1, "low": -600.0, "high": 600.0}
     assert futures_trading.paper_ok(rec, rules) == "ok"
     assert futures_trading.paper_ok({**rec, "outside": 3}, rules) == "no"  # more than 10% of 25 days
-    assert futures_trading.paper_ok({**rec, "days": 19}, rules) == "pending"
+    assert futures_trading.paper_ok({**rec, "days": 2}, rules) == "pending"
     assert futures_trading.paper_ok({**rec, "total": -1.0}, rules) == "no"
     assert futures_trading.paper_record(conn, "f1", band, 2, rules, days[5])["days"] == 5  # today is not finished
     assert futures_trading.paper_ok(futures_trading.paper_record(conn, "f1", None, 2, rules, days[5]), rules) == "no"
@@ -282,7 +282,7 @@ def test_paper_days_are_compared_with_the_backtests_range(conn):
 def test_the_checklist_needs_alpaca_paper_days(client, conn, live):
     v = futures_view.model_verdict(conn, "gap_fade", FEES)
     line = v["items"][5]
-    assert line["label"].startswith("Alpaca paper trading: 20+ days") and line["state"] == "pending"
+    assert line["label"].startswith("Alpaca paper trading: 3+ days") and line["state"] == "pending"
     assert not v["ready"]
 
 
