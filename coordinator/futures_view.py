@@ -23,7 +23,7 @@ from coordinator import futures_data, futures_models, futures_trading, safety
 from coordinator.topstep_broker import CONFIRM_PHRASE, NOT_SET
 from coordinator.models import STATUS_TEXT, list_models
 from coordinator.models_view import SPARK_POINTS, hold_text
-from fleet2.models.futures import REGISTRY
+from fleet2.models.futures import tries_bucket
 from fleet2.sim import futures_stats, topstep
 from fleet2.sim.cme_session import as_date
 
@@ -79,7 +79,7 @@ def beats_twin(entry: dict[str, Any], rules: topstep.Rules) -> bool | None:
 def luck(m: dict[str, Any], tries: dict[str, dict[str, float]]) -> dict[str, Any]:
     """The "chance this is luck" figure and how many tries it counts."""
     train = (m.get("metrics") or {}).get("train") or {}
-    t = tries.get(m["module"]) or {"n": 0, "sum": 0.0, "sq": 0.0}
+    t = tries.get(tries_bucket(m["module"])) or {"n": 0, "sum": 0.0, "sq": 0.0}
     found = m["origin"] == "search"
     trials = max(1, int(t["n"])) if found else 1
     variance = futures_stats.variance_from_sums(int(t["n"]), t["sum"], t["sq"]) if found else 0.0
@@ -288,6 +288,8 @@ def verdict(m: dict[str, Any], rules: topstep.Rules, pick: dict[str, Any], check
 def _settings_text(params: dict[str, Any]) -> str:
     shown = []
     for k, v in params.items():
+        if k == "recipe":  # shown in plain words in the description instead
+            continue
         label = k.replace("_", " ")
         shown.append(f"{label} {v:g}" if isinstance(v, float) else f"{label} {v}")
     return " · ".join(shown)
@@ -401,6 +403,9 @@ def detail(m: dict[str, Any], rules: topstep.Rules, tries: dict[str, Any], check
     origin = "Starter model"
     if m["origin"] == "search":
         origin = f"Found by model search · seed {metrics.get('seed') or '-'}"
+        if metrics.get("recipe_by"):
+            maker = "Claude Haiku" if metrics["recipe_by"] == "haiku" else "a random mix of building blocks"
+            origin += f" · recipe put together by {maker}"
     out: dict[str, Any] = {
         "id": m["id"], "name": m["name"], "tags": tags, "warn_tags": {"Proxy prices", "Synthetic prices",
                                                                       "Rules changed: backtest again"},

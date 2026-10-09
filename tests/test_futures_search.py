@@ -14,6 +14,7 @@ import pytest
 
 from coordinator.futures_data import FakeFuturesSource, split_days
 from fleet2.models.futures import REGISTRY
+from fleet2.models.futures import recipe as R
 from fleet2.models.futures.base import params_with_defaults
 from fleet2.sim import futures_backtest as fb
 from fleet2.sim import futures_data as wfd
@@ -235,7 +236,7 @@ class Coordinator:
         return {"kept": True, "id": f"{body['module']}-s{len(self.found)}"}
 
 
-def search(monkeypatch, cache, coordinator, periods, rounds=2, rules=RULES, robust_share=None):
+def search(monkeypatch, cache, coordinator, periods, rounds=2, rules=RULES, robust_share=None, new_recipes=0):
     monkeypatch.setattr(fs.http, "get_json", coordinator.get_json)
     monkeypatch.setattr(fs.http, "post_json", coordinator.post_json)
     if robust_share is not None:
@@ -247,7 +248,7 @@ def search(monkeypatch, cache, coordinator, periods, rounds=2, rules=RULES, robu
 
     params = {"_context": {"host_url": "http://h", "worker_token": "t"}, "markets": ["futures"], "seed": 4,
               "candidates": 4, "files": ["trend_day", "vwap_revert"], "processes": 1, "rules": rules.to_dict(),
-              "periods": periods, "_cache": cache, "_job_id": "job-1"}
+              "periods": periods, "_cache": cache, "_job_id": "job-1", "new_recipes": new_recipes}
     with pytest.raises(JobStopped):
         fs.run_futures_search(params, None, emit, lambda: bool(events) and max(e[0]["round"] for e in events) > rounds)
     return events
@@ -336,6 +337,53 @@ def test_the_search_uses_kept_models_as_parents(monkeypatch, full, periods):
     assert all(p["parent"] is None for p in seen if p["name"] == "vwap_revert")
 
 
+def test_every_round_tries_new_recipes_and_counts_them_together(monkeypatch, edge, periods):
+    coordinator = Coordinator()
+    seen = []
+    real = fs.proposals
+
+    def spy(*a, **k):
+        out = real(*a, **k)
+        seen.extend(out)
+        return out
+
+    monkeypatch.setattr(fs, "proposals", spy)
+    search(monkeypatch, FakeCache(edge, periods), coordinator, periods, rounds=2, robust_share=-1e9, new_recipes=2)
+    seen = [p for p in seen if p["seed"].startswith(("4:1:", "4:2:"))]  # rounds 1 and 2 (3 was stopped)
+    made = sorted({p["name"] for p in seen if R.is_recipe(p["name"])})
+    assert len(made) == 4  # two new recipes in each of the two rounds
+    for p in seen:
+        if R.is_recipe(p["name"]):
+            assert R.name_of(p["params"]["recipe"]) == p["name"] and p["name"] in p["seed"]
+    # Re-created from the seed: the round's recipes are the same random mixes every time.
+    first = R.random_recipe(random.Random("4:1:recipe:0"))
+    assert R.name_of(first) in made
+    assert [r["recipe"]["n"] for r in coordinator.tries] == [8, 8]  # 2 recipes x 4 candidates, counted together
+    assert all(set(r) == {"trend_day", "vwap_revert", "recipe"} for r in coordinator.tries)
+    for body in coordinator.found:
+        if R.is_recipe(body["module"]):
+            assert body["params"]["recipe"] and R.name_of(body["params"]["recipe"]) == body["module"]
+
+
+def test_kept_recipes_keep_being_tuned(monkeypatch, full, periods):
+    mix = R.random_recipe(random.Random("a kept recipe"))
+    module = R.family(mix)
+    kept = [{"id": module.__name__ + "-s1", "module": module.__name__,
+             "params": params_with_defaults(module, None)}]
+    seen = []
+    real = fs.proposals
+
+    def spy(*a, **k):
+        out = real(*a, **k)
+        seen.extend(out)
+        return out
+
+    monkeypatch.setattr(fs, "proposals", spy)
+    search(monkeypatch, FakeCache(full, periods), Coordinator(kept), periods, rounds=1)
+    tuned = [p for p in seen if p["name"] == module.__name__ and p["seed"].startswith("4:1:")]
+    assert len(tuned) == 2 and sum(p["parent"] == kept[0]["id"] for p in tuned) == 1  # per_file // 4, at least 2
+
+
 def test_a_search_without_the_fees_does_not_start(monkeypatch, full, periods):
     with pytest.raises(RuntimeError, match="Set the fee in config/topstep.toml"):
         search(monkeypatch, FakeCache(full, periods), Coordinator(), periods, rules=topstep.Rules())
@@ -353,6 +401,20 @@ def test_the_futures_backtest_job_reads_training_and_held_out_only(monkeypatch, 
     assert cache.requested == ["train", "held_out"]
     assert result["summary"].startswith("Held-out: passes ") and result["train"]["daily"]
     assert result["held_out"]["sim_key"] == RULES.sim_key() and result["held_out"]["max_size"] >= 1
+
+
+def test_a_recipe_model_runs_through_the_same_backtest_job(monkeypatch, edge, periods):
+    cache = FakeCache(edge, periods)
+    monkeypatch.setattr(futures_jobs, "PriceCache", lambda ctx: cache)
+    module = R.family(R.random_recipe(random.Random("backtest me")))
+    params = {"_context": {"host_url": "h", "worker_token": "t"}, "model_id": module.__name__ + "-s1",
+              "module": module.__name__, "params": params_with_defaults(module, None), "market": "futures",
+              "rules": RULES.to_dict(), "periods": periods}
+    result = futures_jobs.run_futures_backtest(params, None, lambda *a: None, lambda: False)
+    assert cache.requested == ["train", "held_out"] and result["params"]["recipe"] == module.RECIPE
+    assert result["held_out"]["sim_key"] == RULES.sim_key()
+    with pytest.raises(KeyError, match="hold no recipe"):  # a recipe name without its recipe never runs
+        futures_jobs.run_futures_backtest({**params, "params": {}}, None, lambda *a: None, lambda: False)
 
 
 def test_the_final_check_job_opens_the_lockbox_once_and_sends_the_result(monkeypatch, full, periods):

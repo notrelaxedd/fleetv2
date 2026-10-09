@@ -20,7 +20,7 @@ from typing import Any, Callable
 import numpy as np
 
 from fleet2.common import http
-from fleet2.models.futures import get_module
+from fleet2.models.futures import module_for
 from fleet2.models.futures.base import params_with_defaults
 from fleet2.sim import futures_backtest as fb
 from fleet2.sim import futures_stats, topstep
@@ -123,7 +123,7 @@ def summary_line(train: dict[str, Any], held: dict[str, Any]) -> str:
 def run_futures_backtest(params: dict[str, Any], checkpoint: dict[str, Any] | None, emit: Any,
                          should_stop: Any) -> dict[str, Any]:
     """Run backtest for a futures model: its training numbers and its held-out numbers."""
-    module = get_module(str(params["module"]))
+    module = module_for(str(params["module"]), params.get("params"))
     model_params = params_with_defaults(module, params.get("params"))
     rules = topstep.Rules.from_dict(params["rules"])
     periods = params["periods"]
@@ -145,7 +145,7 @@ def run_futures_backtest(params: dict[str, Any], checkpoint: dict[str, Any] | No
 def run_final_check(params: dict[str, Any], checkpoint: dict[str, Any] | None, emit: Any, should_stop: Any) -> dict[str, Any]:
     """The lockbox, opened once for one model at the contract size chosen on held-out
     prices. The result goes straight to the coordinator, which keeps it forever."""
-    module = get_module(str(params["module"]))
+    module = module_for(str(params["module"]), params.get("params"))
     model_params = params_with_defaults(module, params.get("params"))
     rules = topstep.Rules.from_dict(params["rules"])
     periods = params["periods"]

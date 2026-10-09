@@ -6,6 +6,7 @@ proxy prices), the once-only Final check, and no orders for futures models."""
 from __future__ import annotations
 
 import copy
+import random
 import re
 from dataclasses import replace
 from datetime import date
@@ -16,6 +17,7 @@ import pytest
 from coordinator import futures_data, futures_models, futures_view, models
 from coordinator.futures_data import FakeFuturesSource, split_days
 from fleet2.models.futures import REGISTRY
+from fleet2.models.futures import recipe as R
 from fleet2.models.futures.base import params_with_defaults
 from fleet2.sim import futures_data as wfd
 from fleet2.sim import topstep
@@ -219,6 +221,51 @@ def test_a_find_that_trades_like_a_kept_model_is_dropped(conn):
     better = futures_models.store_found(conn, None, found("pullback", 3.0, twin))
     assert better["kept"] and better["replaced"] == "trend_day-s1"
     assert futures_models.correlation({1: 1.0, 2: 2.0}, {1: 1.0}) is None
+
+
+def recipe_found(i: int, score: float, pnl: list[float]) -> dict:
+    module = R.family(R.random_recipe(random.Random(f"kept recipe {i}")))
+    days = list(range(20240101, 20240101 + len(pnl)))
+    m = real_metrics()
+    m["train"]["daily"] = {"days": days, "pnl": pnl}
+    return {"module": module.__name__, "params": params_with_defaults(module, None), "train_score": score,
+            "seed": f"1:1:{module.__name__}:0", "parent": None, "metrics": m}
+
+
+def test_recipe_finds_share_one_pool_and_keep_their_recipe(conn, monkeypatch):
+    monkeypatch.setattr(futures_models, "KEEP_RECIPES", 3)
+    finds = [recipe_found(i, 1.0 + i, noise(100 + i)) for i in range(3)]
+    for body in finds:
+        assert futures_models.store_found(conn, None, body)["kept"]
+    weak = futures_models.store_found(conn, None, recipe_found(7, 0.5, noise(107)))
+    assert not weak["kept"] and "weakest of 3 kept recipe models" in weak["reason"]
+    strong = futures_models.store_found(conn, None, recipe_found(8, 9.0, noise(108)))
+    assert strong["kept"] and strong["replaced"] == finds[0]["module"] + "-s1"  # the lowest score goes
+    row = conn.execute("SELECT * FROM models WHERE id = %s", (strong["id"],)).fetchone()
+    assert R.name_of(row["params"]["recipe"]) == row["module"] and row["metrics"]["recipe_by"] == "random"
+    assert row["description"].startswith("A recipe model: ") and row["name"].endswith(" #1")
+    detail = futures_view.detail(row, FEES, {}, None, False, "synthetic")
+    assert "recipe put together by a random mix of building blocks" in detail["origin"]
+    assert "recipe" not in detail["settings"] and "stop ticks" in detail["settings"]
+    # The five files keep their own limits beside the recipes.
+    assert futures_models.store_found(conn, None, found("gap_fade", 1.0, noise(200)))["kept"]
+
+
+def test_a_find_whose_recipe_does_not_match_its_name_is_refused(conn):
+    body = recipe_found(1, 2.0, noise(5))
+    body["params"]["recipe"] = R.random_recipe(random.Random("another"))
+    with pytest.raises(Exception, match="not " + body["module"]):
+        futures_models.store_found(conn, None, body)
+
+
+def test_recipe_tries_are_counted_together(client, conn, fees):
+    w = enroll(client, conn, "w1")
+    hdr = {"Authorization": "Bearer " + w["worker_token"]}
+    r = client.post("/api/v1/search/tries", json={"tries": {"recipe": {"n": 40, "sum": 1.0, "sq": 0.5}}}, headers=hdr)
+    assert r.status_code == 200 and futures_models.tries(conn)["recipe"]["n"] == 40
+    m = {"module": R.name_of(R.random_recipe(random.Random(1))), "origin": "search",
+         "metrics": {"train": {"sr_day": 0.08, "n_days": 150, "skew": 0.0, "kurt": 3.0}}}
+    assert futures_view.luck(m, futures_models.tries(conn))["trials"] == 40
 
 
 def test_tries_are_counted_and_feed_the_luck_figure(client, conn, fees):

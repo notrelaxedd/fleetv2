@@ -35,7 +35,7 @@ from coordinator.broker import NEVER_REACHED, BrokerStatus
 from coordinator.errors import BadRequest, Conflict, NotFound
 from coordinator.limits import Limits
 from coordinator.topstep_broker import TopstepLink
-from fleet2.models.futures import get_module
+from fleet2.models.futures import module_for
 from fleet2.sim import cme_session, topstep
 from fleet2.universe import CONTRACTS
 
@@ -171,7 +171,7 @@ def receive_signal(conn: psycopg.Connection, worker_id: str, body: dict[str, Any
                         (job["id"],)).fetchone()
     if book is None:
         raise Conflict("the model is not trading any more")
-    module = get_module(job["params"]["module"])
+    module = module_for(job["params"]["module"], job["params"].get("params"))
     wanted: dict[str, int] = {}
     for symbol, q in (body.get("contracts") or {}).items():
         if symbol not in module.SYMBOLS:
