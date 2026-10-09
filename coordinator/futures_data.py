@@ -28,6 +28,7 @@ import hashlib
 import io
 import json
 import logging
+import re
 import threading
 import tomllib
 import urllib.error
@@ -105,6 +106,30 @@ class DatabentoError(RuntimeError):
     pass
 
 
+class _PastAvailableEnd(DatabentoError):
+    """Databento's 422 "data_end_after_available_end": its history runs a few minutes
+    behind the market, and the answer names the last moment it has."""
+
+    def __init__(self, end: datetime) -> None:
+        super().__init__(f"Databento has data up to {_iso(end)}")
+        self.end = end
+
+
+_AVAILABLE_UP_TO = re.compile(r"available up to '([^']+)'")
+
+
+def _available_end(detail: str) -> datetime | None:
+    """The time in "... has data available up to '2026-10-09 02:00:00+00:00' ...", or None."""
+    match = _AVAILABLE_UP_TO.search(detail)
+    if not match:
+        return None
+    text = re.sub(r"(\.\d{6})\d+", r"\1", match.group(1).strip().replace("Z", "+00:00"))
+    try:
+        return _utc(datetime.fromisoformat(text))
+    except ValueError:
+        return None
+
+
 class DatabentoSource:
     """Databento's historical HTTP API (the same calls the official SDK makes):
     POST {DATABENTO_URL}/metadata.get_cost and /timeseries.get_range, form fields, the
@@ -132,10 +157,13 @@ class DatabentoSource:
             with self._open(req, timeout=self._timeout) as resp:
                 return resp.read()
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")[:300]
+            detail = exc.read().decode("utf-8", "replace")
             if exc.code in (401, 403):
                 raise DatabentoError("Databento refused DATABENTO_API_KEY in .env on box1: check the key") from None
-            raise DatabentoError(f"Databento answered {exc.code}: {detail}") from None
+            end = _available_end(detail) if exc.code == 422 and "data_end_after_available_end" in detail else None
+            if end is not None:
+                raise _PastAvailableEnd(end) from None
+            raise DatabentoError(f"Databento answered {exc.code}: {detail[:300]}") from None
         except (urllib.error.URLError, OSError) as exc:
             raise DatabentoError(f"Cannot reach Databento: {exc}") from None
 
@@ -149,17 +177,36 @@ class DatabentoSource:
             "end": _iso(end) or "",
         }
 
+    def _ranged(self, path: str, symbol: str, start: datetime, end: datetime,
+                extra: dict[str, str] | None = None) -> bytes | None:
+        """POST a request for start..end. When `end` is past what Databento has (its
+        history runs a few minutes behind the market), ask again up to the end it names.
+        None when it has nothing after `start` yet."""
+        for _ in range(2):
+            if end <= start:
+                return None
+            try:
+                return self._post(path, {**self._fields(symbol, start, end), **(extra or {})})
+            except _PastAvailableEnd as exc:
+                if exc.end >= end:
+                    break
+                end = exc.end
+        raise DatabentoError(f"Databento kept refusing the end time {_iso(end)} for {symbol}")
+
     def cost(self, symbol: str, start: datetime, end: datetime) -> float:
-        raw = self._post("metadata.get_cost", self._fields(symbol, start, end))
+        raw = self._ranged("metadata.get_cost", symbol, start, end)
+        if raw is None:
+            return 0.0
         try:
             return float(json.loads(raw))
         except (TypeError, ValueError):
             raise DatabentoError(f"Databento sent an unreadable cost: {raw[:100]!r}") from None
 
     def fetch(self, symbol: str, start: datetime, end: datetime) -> list[dict]:
-        fields = {**self._fields(symbol, start, end), "stype_out": "instrument_id", "encoding": "csv",
-                  "compression": "none", "pretty_px": "true", "pretty_ts": "false", "map_symbols": "false"}
-        return parse_databento_csv(self._post("timeseries.get_range", fields).decode("utf-8", "replace"))
+        extra = {"stype_out": "instrument_id", "encoding": "csv", "compression": "none", "pretty_px": "true",
+                 "pretty_ts": "false", "map_symbols": "false"}
+        raw = self._ranged("timeseries.get_range", symbol, start, end, extra)
+        return [] if raw is None else parse_databento_csv(raw.decode("utf-8", "replace"))
 
 
 def _price(text: str) -> float:
