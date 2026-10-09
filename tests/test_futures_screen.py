@@ -13,6 +13,7 @@ from datetime import date
 
 import numpy as np
 import pytest
+from psycopg.types.json import Jsonb
 
 from coordinator import futures_data, futures_models, futures_view, models
 from coordinator.futures_data import FakeFuturesSource, split_days
@@ -249,6 +250,49 @@ def test_recipe_finds_share_one_pool_and_keep_their_recipe(conn, monkeypatch):
     assert "recipe" not in detail["settings"] and "stop ticks" in detail["settings"]
     # The five files keep their own limits beside the recipes.
     assert futures_models.store_found(conn, None, found("gap_fade", 1.0, noise(200)))["kept"]
+
+
+def same_recipe_found(score: float, seed: int, **params) -> dict:
+    body = recipe_found(1, score, noise(300 + seed))
+    module = R.family(body["params"]["recipe"])
+    body["params"] = params_with_defaults(module, params)
+    return body
+
+
+def test_one_recipe_cannot_fill_every_place(conn):
+    finds = [same_recipe_found(1.0 + i, i, start_minute=30 + 60 * i) for i in range(3)]
+    for body in finds:
+        assert futures_models.store_found(conn, None, body)["kept"]
+    name = finds[0]["module"]
+    near = same_recipe_found(1.5, 9, start_minute=95)  # closest to the 2nd (90), which scores 2.0
+    reply = futures_models.store_found(conn, None, near)
+    assert not reply["kept"] and "closest kept model of this recipe" in reply["reason"]
+    better = same_recipe_found(2.5, 10, start_minute=95)
+    reply = futures_models.store_found(conn, None, better)
+    assert reply["kept"] and reply["replaced"] == name + "-s2"
+    kept = conn.execute("SELECT count(*) AS n FROM models WHERE module = %s AND status = 'backtested'",
+                        (name,)).fetchone()["n"]
+    assert kept == futures_models.KEEP_PER_RECIPE
+    # Another recipe still gets a place.
+    assert futures_models.store_found(conn, None, recipe_found(5, 0.5, noise(400)))["kept"]
+
+
+def test_extra_models_of_one_recipe_are_retired_but_never_a_trading_or_checked_one(conn):
+    models.sync_starters(conn)
+    module = R.family(R.random_recipe(random.Random("crowded")))
+    for i in range(6):  # as box1 had them before the limit: one recipe, many places
+        conn.execute("INSERT INTO models (id, name, module, market, description, how_it_works, params, status, origin, "
+                     "metrics) VALUES (%s, %s, %s, 'futures', '', '', %s, 'backtested', 'search', %s)",
+                     (f"{module.__name__}-s{i + 1}", f"{module.NAME} #{i + 1}", module.__name__,
+                      Jsonb(params_with_defaults(module, None)), Jsonb({"train_score": float(i)})))
+    conn.execute("INSERT INTO futures_books (model_id, venue, contracts) VALUES (%s, 'alpaca_paper', 1)",
+                 (module.__name__ + "-s1",))  # the weakest, but trading on paper
+    retired = futures_models.trim_recipes(conn)
+    assert sorted(retired) == sorted(f"{module.__name__}-s{i}" for i in (2, 3, 4))
+    left = {r["id"] for r in conn.execute("SELECT id FROM models WHERE module = %s AND status = 'backtested'",
+                                          (module.__name__,))}
+    assert left == {f"{module.__name__}-s{i}" for i in (1, 5, 6)}  # the trading one and the two best
+    assert futures_models.trim_recipes(conn) == []
 
 
 def test_a_find_whose_recipe_does_not_match_its_name_is_refused(conn):
