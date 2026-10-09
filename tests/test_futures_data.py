@@ -78,8 +78,10 @@ def test_trading_day_of_a_bar():
 class FakeDatabento:
     """Stands in for urllib's urlopen: records every request, answers cost and CSV."""
 
-    def __init__(self, cost: float = 1.0, rows: list[str] | None = None, status: int = 200) -> None:
+    def __init__(self, cost: float = 1.0, rows: list[str] | None = None, status: int = 200,
+                 available_end: str | None = None) -> None:
         self.cost, self.rows, self.status = cost, rows or [], status
+        self.available_end = available_end  # Databento's history ends here (e.g. "2026-10-09T02:00:00Z")
         self.requests: list[tuple[str, dict[str, list[str]], dict[str, str]]] = []
 
     def __call__(self, req, timeout=None):
@@ -89,6 +91,17 @@ class FakeDatabento:
         self.requests.append((req.full_url, fields, dict(req.header_items())))
         if self.status != 200:
             raise urllib.error.HTTPError(req.full_url, self.status, "no", {}, io.BytesIO(b'{"detail":"bad key"}'))
+        if self.available_end and fields["end"][0] > self.available_end:
+            # The answer Databento gave on box1, word for word apart from the times.
+            shown = self.available_end.replace("T", " ").replace("Z", "+00:00")
+            asked = fields["end"][0].replace("T", " ").replace("Z", ".046092+00:00")
+            body = json.dumps({"detail": {
+                "case": "data_end_after_available_end",
+                "message": f"The dataset GLBX.MDP3 has data available up to '{shown}'. The `end` in the query "
+                           f"('{asked}') is after the available range. Try requesting with an earlier `end`.",
+                "status_code": 422, "docs": "https://databento.com/docs/api-reference-historical/basics/datasets",
+                "payload": None}}).encode()
+            raise urllib.error.HTTPError(req.full_url, 422, "Unprocessable", {}, io.BytesIO(body))
         if req.full_url.endswith("metadata.get_cost"):
             body = json.dumps(self.cost).encode()
         else:
@@ -110,8 +123,8 @@ class _Resp:
         return None
 
 
-def databento(cost=1.0, rows=None, status=200) -> tuple[fd.DatabentoSource, FakeDatabento]:
-    fake = FakeDatabento(cost, rows, status)
+def databento(cost=1.0, rows=None, status=200, available_end=None) -> tuple[fd.DatabentoSource, FakeDatabento]:
+    fake = FakeDatabento(cost, rows, status, available_end)
     return fd.DatabentoSource("db-test-key", opener=fake), fake
 
 
@@ -151,6 +164,37 @@ def test_databento_refuses_a_bad_key_in_plain_words():
     src, _ = databento(status=401)
     with pytest.raises(fd.DatabentoError, match="DATABENTO_API_KEY"):
         src.cost("MES", datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 2, 1, tzinfo=UTC))
+
+
+def test_databento_history_ends_a_few_minutes_behind_so_the_end_is_moved_back():
+    d = date(2026, 10, 8)
+    src, fake = databento(cost=0.3, rows=[csv_row(ct(d, 8, 30), 7, 6700.0, 6701.0, 6699.0, 6700.5)],
+                          available_end="2026-10-09T02:00:00Z")
+    start, now = datetime(2026, 10, 1, tzinfo=UTC), datetime(2026, 10, 9, 2, 4, 38, tzinfo=UTC)
+    assert src.cost("MES", start, now) == pytest.approx(0.3)
+    assert len(src.fetch("MES", start, now)) == 1
+    ends = [f["end"][0] for _, f, _ in fake.requests]
+    assert ends == ["2026-10-09T02:04:38Z", "2026-10-09T02:00:00Z"] * 2
+    # Nothing after the start yet: no request at all for the empty part, no error.
+    late = datetime(2026, 10, 9, 2, 1, tzinfo=UTC)
+    assert src.cost("MES", late, now) == 0.0 and src.fetch("MES", late, now) == []
+
+
+def test_a_refresh_right_after_the_market_works_although_databento_is_behind(conn):
+    d = date(2026, 10, 8)
+    src, _ = databento(cost=0.5, rows=[csv_row(ct(d, 8, 30), 7, 6700.0, 6701.0, 6699.0, 6700.5)],
+                       available_end="2026-10-09T02:00:00Z")
+    now = datetime(2026, 10, 9, 2, 4, 38, tzinfo=UTC)
+    conn.execute("INSERT INTO bars (symbol, timeframe, ts, open, high, low, close, volume, feed, instrument_id) "
+                 "VALUES ('MES', '1Min', '2026-10-07 19:59:00+00', 1, 1, 1, 1, 1, 'databento', 7)")
+    r = fd.refresh_step(conn, src, "MES", cap_usd=10.0, now=now)
+    assert r["error"] is None and r["added"] == 1 and r["done"]
+
+
+def test_the_available_end_is_read_in_every_time_format():
+    assert fd._available_end("has data available up to '2026-10-09 02:00:00+00:00'.") == datetime(2026, 10, 9, 2, tzinfo=UTC)
+    assert fd._available_end("has data available up to '2026-10-09T02:00:00.123456789Z'") == datetime(2026, 10, 9, 2, 0, 0, 123456, tzinfo=UTC)
+    assert fd._available_end("something else") is None
 
 
 def test_a_download_above_the_cap_is_refused_before_anything_is_fetched(conn):
