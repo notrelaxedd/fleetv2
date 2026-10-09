@@ -23,7 +23,7 @@ from typing import Any
 import numpy as np
 
 from fleet2.common import http
-from fleet2.models.futures import get_module
+from fleet2.models.futures import module_for
 from fleet2.models.futures.base import params_with_defaults
 from fleet2.sim import cme_session, topstep
 from fleet2.sim import futures_backtest as fb
@@ -67,7 +67,7 @@ def decide(data: FuturesData, module: Any, params: dict[str, Any], contracts: in
 def run_futures_live(params: dict[str, Any], checkpoint: dict[str, Any] | None, emit: Any, should_stop: Any) -> dict[str, Any]:
     ctx = params["_context"]
     host, token = str(ctx["host_url"]), str(ctx["worker_token"])
-    module = get_module(str(params["module"]))
+    module = module_for(str(params["module"]), params.get("params"))
     model_params = params_with_defaults(module, params.get("params"))
     rules = topstep.Rules.from_dict(params["rules"])
     contracts = max(1, int(params.get("contracts") or 1))

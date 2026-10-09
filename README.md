@@ -186,6 +186,57 @@ Each can go long or short, decides on 1-, 3-, 5- or 15-minute bars, and has an o
 stop and target in ticks; model search tries all of these. Every one passes the
 cut-off test (`tests/test_futures_cutoff.py`).
 
+### Recipes: new ideas from building blocks
+
+Model search can only tune the settings of an idea, so besides the five files it also
+tries **recipes** (`fleet2/models/futures/recipe.py`): models put together from building
+blocks, never from new code. A recipe picks:
+
+- one **signal**: opening-range break, stretch from VWAP, a short and a longer average
+  of today's prices crossing, a gap from yesterday, a move from today's open, a new high
+  or low of the day, or short-term momentum. It can **follow** the signal or **fade** it;
+- up to two **filters**: a quiet day, a busy day, on the trade's side of VWAP or of the
+  open, after a gap, or without one;
+- one **exit**: hold to the stop, target or close, out at a cross of VWAP, profit at
+  VWAP, out on the opposite signal, or out after a number of bars;
+- the day's first signal only or every signal, and long, short or both.
+
+Every round of a futures search adds three new random recipes, each tried with a full
+set of settings, and keeps tuning the recipes of models already kept. At most 15 recipe
+models are kept at a time (a new find replaces the weakest when it scores higher), and
+all recipe tries count together in the "chance this is luck" figure. A recipe model's
+page says so ("recipe put together by a random mix of building blocks"), and its
+description is written from its blocks.
+
+Each building block uses only the bar itself and earlier bars, and
+`tests/test_futures_recipes.py` runs the cut-off test on every block and on many random
+recipes.
+
+### Claude Haiku writing recipes
+
+With a Claude API key, Claude Haiku 5.5 also writes recipes while a futures model search
+runs (`coordinator/ai_ideas.py`, plan in `docs/AI_PLAN.md`). To turn it on, put the key in
+`.env` on box1 (only the coordinator reads it) and run `docker compose up -d coordinator`:
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+- Haiku is shown the building blocks and every recipe tried so far with its **training**
+  results only (best score, days traded, profit at double costs). Held-out and lockbox
+  results never reach it, so it cannot tune its ideas to the tests that judge them.
+- Its answer has a fixed shape (structured output), and each recipe must pass the same
+  checks as a random one. Nothing it writes is ever run as code.
+- Each search round takes up to three of its recipes **beside** the round's random ones,
+  so the Futures view can show how many recipe models each has kept.
+- Every call's cost is recorded. `config/ai.toml` sets a monthly cap ($5 to start), the
+  model, how many recipes per call, at most six calls an hour, and the prices it counts
+  with. A call is only made when the month's spend plus the most it could cost stays
+  under the cap. At about $0.001 a call, $5 covers thousands of calls.
+- The Futures view says whether Haiku is on, what it has written and kept this month,
+  what it has cost against the cap, and the last problem if a call failed. A model whose
+  recipe Haiku wrote says so on its page, with Haiku's one sentence on the idea.
+
 ## Futures on the Models screen
 
 ![Futures view](docs/screenshots/futures-models-desktop.png)
@@ -198,7 +249,7 @@ top it says where the futures prices come from ("proxy" when they are the SPY/QQ
 stand-in, "synthetic" in demo mode), with two buttons:
 
 - **Load futures prices** starts a Futures prices job (see "Futures prices").
-- **Start model search** searches the five futures model files. It stays greyed out,
+- **Start model search** searches the five futures model files and new recipes. It stays greyed out,
   with "Set the fee in config/topstep.toml" under it, until the commissions are filled
   in there. One search runs at a time, stocks and crypto or futures.
 

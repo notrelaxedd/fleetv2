@@ -7,7 +7,7 @@ import psycopg
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from coordinator import auth, futures_models, models, search
+from coordinator import ai_ideas, auth, futures_models, models, search
 from coordinator.errors import BadRequest
 from coordinator.api.deps import DB, bearer, require_owner
 from coordinator.api.limits import small_payload
@@ -130,6 +130,14 @@ class TriesBody(BaseModel):
     model_config = ConfigDict(extra="ignore")
     job_id: str | None = Field(default=None, max_length=64)
     tries: dict[str, dict[str, float]]
+    # Per recipe tried this round: its TRAINING numbers only (see coordinator.ai_ideas).
+    recipes: list[dict[str, Any]] = Field(default_factory=list, max_length=200)
+
+
+class IdeasBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    job_id: str | None = Field(default=None, max_length=64)
+    take: int = Field(default=0, ge=0, le=20)
 
 
 worker_search_router = APIRouter(prefix="/api/v1/search", tags=["search"])
@@ -140,7 +148,20 @@ def report_tries(body: TriesBody, token: str = Depends(bearer), conn: psycopg.Co
     """How many futures settings a search round tried, per model file."""
     auth.worker_for_token(conn, token)
     futures_models.add_tries(conn, body.tries)
+    if body.recipes:
+        ai_ideas.record_results(conn, body.job_id, body.recipes)
     return {"ok": True}
+
+
+@worker_search_router.post("/ideas")
+def take_ideas(body: IdeasBody, request: Request, token: str = Depends(bearer),
+               conn: psycopg.Connection = DB) -> list[dict[str, Any]]:
+    """Recipes Claude Haiku wrote, for a futures search round to try (at most per_round in
+    config/ai.toml; none while Haiku is off)."""
+    auth.worker_for_token(conn, token)
+    settings = request.app.state.ai
+    count = min(body.take, settings.per_round) if settings.enabled and request.app.state.ai_key else 0
+    return ai_ideas.take(conn, body.job_id, count)
 
 
 class SearchBody(BaseModel):

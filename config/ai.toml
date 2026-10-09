@@ -1,0 +1,36 @@
+# fleet-v2 AI settings: Claude Haiku writing recipes for futures model search
+# (docs/AI_PLAN.md). Edit on box1, then `docker compose restart coordinator`.
+#
+# The key goes in .env on box1 (ANTHROPIC_API_KEY=...), read only by the coordinator.
+# Without a key nothing here runs and nothing is spent.
+
+[spend]
+# The most all AI features together may spend in a calendar month (UTC), in US dollars.
+# Before every call the coordinator adds the most that call could cost to what this
+# month has cost so far, and does not make it if that would go over. Your own cap.
+monthly_cap_usd = 5.0
+
+[recipes]
+# Claude Haiku writes recipes while a futures model search runs; the search takes them
+# at the start of a round, beside its random recipes (so the two can be compared).
+enabled = true
+model = "claude-haiku-5-5"
+# Recipes asked for in one call, and the most untried Haiku recipes kept waiting.
+per_call = 4
+queue = 8
+# At most this many calls an hour.
+calls_per_hour = 6
+# Haiku recipes a search round takes (on top of its random ones).
+per_round = 3
+# How hard Haiku thinks before answering: "low", "medium" or "high". More thinking
+# costs more (it is billed as output).
+effort = "low"
+# The longest answer, thinking included, in tokens. Also what the cap check counts.
+max_tokens = 8000
+
+[prices]
+# US dollars per million tokens for claude-haiku-5-5, for prompts up to 100,000 tokens
+# (these are far shorter). Source: Anthropic's price list, October 2026. Check at
+# claude.com/pricing.
+input_per_million = 0.10
+output_per_million = 0.50

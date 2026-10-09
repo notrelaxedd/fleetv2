@@ -1,12 +1,16 @@
 """Futures models on the coordinator: the five starter files, what model search finds,
 the count of settings tried, the jobs' parameters and the once-only Final check.
 
-Keeping a varied set (at most KEEP_PER_FILE found models per model file):
+Keeping a varied set (at most KEEP_PER_FILE found models per model file, and at most
+KEEP_RECIPES recipe models in all; recipes are models put together from building blocks,
+see fleet2/models/futures/recipe.py):
 - A find whose training days' P&L moves more than 90% like a kept model's is the same
   idea twice: it replaces that model when its training score is higher, and is dropped
   otherwise.
 - Otherwise, with fewer than KEEP_PER_FILE kept for its file it is kept; with that many
   it replaces the kept model with the closest settings, when it scores higher.
+- A recipe model is kept while fewer than KEEP_RECIPES are; with that many it replaces
+  the lowest-scoring recipe model, when it scores higher.
 Training scores decide; held-out results never do (they are for ranking).
 
 No order is ever placed for a futures model: they cannot paper trade (trading.start
@@ -22,11 +26,12 @@ from psycopg.types.json import Jsonb
 
 from coordinator import futures_data, queue
 from coordinator.errors import BadRequest, Conflict, NotFound
-from fleet2.models.futures import REGISTRY
+from fleet2.models.futures import REGISTRY, module_for, recipe
 from fleet2.models.futures.base import check_module, params_with_defaults
 from fleet2.sim import topstep
 
 KEEP_PER_FILE = 5
+KEEP_RECIPES = 15
 ALIKE = 0.9  # daily P&L correlation above which two models count as the same idea
 
 
@@ -80,7 +85,7 @@ def add_tries(conn: psycopg.Connection, tries: dict[str, Any]) -> None:
     """Add a round's tried settings per model file: how many, and the sum and sum of
     squares of their daily Sharpe ratios."""
     for module, t in tries.items():
-        if module not in REGISTRY:
+        if module not in REGISTRY and module != "recipe":
             raise BadRequest(f"unknown futures model file {module!r}")
         n, total, squares = int(t.get("n") or 0), float(t.get("sum") or 0.0), float(t.get("sq") or 0.0)
         if n < 0 or not all(np.isfinite([total, squares])):
@@ -133,9 +138,10 @@ def distance(module: Any, a: dict[str, Any], b: dict[str, Any]) -> float:
 def store_found(conn: psycopg.Connection, worker_id: str | None, body: dict[str, Any]) -> dict[str, Any]:
     """A futures model a search job found (see the module docstring for what is kept)."""
     name = str(body["module"])
-    if name not in REGISTRY:
-        raise BadRequest(f"unknown futures model file {name!r}")
-    module = REGISTRY[name]
+    try:
+        module = module_for(name, body.get("params"))
+    except (KeyError, ValueError) as exc:
+        raise BadRequest(f"unknown futures model file or recipe {name!r}: {exc}") from None
     params = params_with_defaults(module, body["params"])
     score = float(body["train_score"])
     metrics = dict(body["metrics"])
@@ -150,7 +156,15 @@ def store_found(conn: psycopg.Connection, worker_id: str | None, body: dict[str,
                 return {"kept": False, "reason": f"trades like {other['name']} ({alike:.0%} alike), which scores higher"}
             replace = other
             break
-    if replace is None:
+    if replace is None and recipe.is_recipe(name):
+        recipes = [k for k in kept if recipe.is_recipe(k["module"])]
+        if len(recipes) >= KEEP_RECIPES:
+            weakest = min(recipes, key=lambda k: k["score"] if k["score"] is not None else float("-inf"))
+            if weakest["score"] is not None and weakest["score"] >= score:
+                return {"kept": False, "reason": f"not better than the weakest of {KEEP_RECIPES} kept recipe models, "
+                                                 f"{weakest['name']}"}
+            replace = weakest
+    elif replace is None:
         same = [k for k in kept if k["module"] == name]
         if len(same) >= KEEP_PER_FILE:
             closest = min(same, key=lambda k: distance(module, params, k["params"]))
@@ -166,6 +180,14 @@ def store_found(conn: psycopg.Connection, worker_id: str | None, body: dict[str,
         model_id = f"{name}-s{n}"
     metrics.update(train_score=score, seed=body.get("seed"), parent=body.get("parent"), found_by=worker_id,
                    job_id=body.get("job_id"))
+    if recipe.is_recipe(name):  # who put the recipe together: a random mix, or Claude Haiku (stage B)
+        idea = None
+        if body.get("idea_id") is not None:
+            idea = conn.execute("SELECT id, note FROM recipe_ideas WHERE id = %s AND family = %s AND by = 'haiku'",
+                                (int(body["idea_id"]), name)).fetchone()
+        metrics["recipe_by"] = "haiku" if idea else "random"
+        if idea:
+            metrics.update(idea_id=int(idea["id"]), idea=idea["note"] or "")
     conn.execute(
         """
         INSERT INTO models (id, name, module, market, description, how_it_works, params, status, origin, metrics, backtested_at)

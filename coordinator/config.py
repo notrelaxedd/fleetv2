@@ -66,6 +66,10 @@ class Config:
     topstepx_api_key: str = field(default="", repr=False)
     topstepx_account: str = ""
     topstepx_api_url: str = "https://api.topstepx.com"
+    # Claude (docs/AI_PLAN.md): Claude Haiku writes recipes for futures model search.
+    # Off without a key; spending is capped in config/ai.toml.
+    anthropic_api_key: str = field(default="", repr=False)
+    ai_path: Path = REPO_ROOT / "config" / "ai.toml"
 
     def __post_init__(self) -> None:
         if not self.allowed_origins:
@@ -102,6 +106,8 @@ class Config:
             topstepx_api_key=env.get("TOPSTEPX_API_KEY", "").strip(),
             topstepx_account=env.get("TOPSTEPX_ACCOUNT", "").strip(),
             topstepx_api_url=(env.get("TOPSTEPX_API_URL", "").strip() or "https://api.topstepx.com").rstrip("/"),
+            anthropic_api_key=env.get("ANTHROPIC_API_KEY", "").strip(),
+            ai_path=Path(env.get("FLEET_AI_FILE", str(REPO_ROOT / "config" / "ai.toml"))),
         )
 
     @property

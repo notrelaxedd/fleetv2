@@ -134,4 +134,34 @@ def make_futures_tasks(venues: Any, rules: Any, limits: Limits) -> tuple[Callabl
     return (live_prices, trade, topstep_account)
 
 
+def make_ai_tasks(settings: Any, key: str) -> tuple[Callable[[ConnectionPool], None], ...]:
+    """Claude Haiku writing recipes for futures model search (coordinator.ai_ideas): at
+    most once a minute it checks whether a call is allowed (a key, a futures search
+    running, too few recipes waiting, under the hourly count and the monthly cap) and,
+    if so, makes one. Nothing without a key."""
+    from coordinator import ai_ideas
+
+    if not key or not settings.enabled:
+        return ()
+    last = {"t": -1e9}
+
+    def recipes(pool: ConnectionPool) -> None:
+        now_m = time.monotonic()
+        if now_m - last["t"] < 60:
+            return
+        last["t"] = now_m
+        with pool.connection() as conn:
+            try:
+                result = ai_ideas.write_recipes(conn, settings, key)
+                conn.commit()
+            except Exception as exc:  # noqa: BLE001 - reported, tried again next minute
+                conn.rollback()
+                log.warning("Claude Haiku recipes: %s", exc)
+                return
+        if result.get("written"):
+            log.info("Claude Haiku wrote %d recipe(s) for $%.4f", result["written"], result.get("cost") or 0.0)
+
+    return (recipes,)
+
+
 MARKETS_FUTURES = ("MES", "MNQ")
