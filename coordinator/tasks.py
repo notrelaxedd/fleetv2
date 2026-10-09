@@ -71,3 +71,67 @@ def refresh_market(pool: ConnectionPool, bar_source: Any, market: str, max_steps
     if added:
         log.info("price refresh %s: %d new bars", market, added)
     return added
+
+
+def make_futures_tasks(venues: Any, rules: Any, limits: Limits) -> tuple[Callable[[ConnectionPool], None], ...]:
+    """Futures models trading (coordinator.futures_trading), each in its own transaction:
+
+    - live prices: every few seconds while a futures book trades and the session is open,
+      the newest closed minutes of each place's own prices (futures_live)
+    - trade: book fills, move each book to what its model wants, value today's dips
+    - Topstep: the account's balance and loss floor every 30 s (pausing Topstep trading at
+      its safety margin) and the balance at the end of each day
+    """
+    from coordinator import futures_live, futures_trading
+
+    last: dict[str, float] = {}
+
+    def live_prices(pool: ConnectionPool) -> None:
+        now_m = time.monotonic()
+        if now_m - last.get("prices", -1e9) < futures_live.REFRESH_S:
+            return
+        last["prices"] = now_m
+        now = datetime.now(timezone.utc)
+        with pool.connection() as conn:
+            rows = conn.execute("SELECT DISTINCT venue FROM futures_books WHERE status IN ('active', 'closing')").fetchall()
+            for r in rows:
+                name = futures_live.source_for(r["venue"], venues.fake)
+                source = venues.sources.get(name)
+                if source is None:
+                    continue
+                empty = futures_live.latest(conn, name, "MES") is None
+                if not (empty or futures_live.session_window(now)):
+                    continue
+                for symbol in MARKETS_FUTURES:
+                    try:
+                        futures_live.refresh(conn, name, source, symbol, now)
+                        conn.commit()
+                    except Exception as exc:  # noqa: BLE001 - reported, retried next time
+                        conn.rollback()
+                        log.warning("live futures prices %s %s: %s", name, symbol, exc)
+
+    def trade(pool: ConnectionPool) -> None:
+        with pool.connection() as conn:
+            if not conn.execute("SELECT 1 FROM futures_books WHERE status IN ('active', 'closing') LIMIT 1").fetchone():
+                return
+            futures_trading.poll_fills(conn, venues, rules)
+            futures_trading.execute_pass(conn, venues, rules, limits)
+            futures_trading.mark_days(conn, venues)
+
+    def topstep_account(pool: ConnectionPool) -> None:
+        now_m = time.monotonic()
+        if not venues.topstep.on or now_m - last.get("topstep", -1e9) < 30:
+            return
+        last["topstep"] = now_m
+        with pool.connection() as conn:
+            try:
+                venues.topstep_state = futures_trading.topstep_check(conn, venues, rules)
+            except Exception as exc:  # noqa: BLE001
+                conn.rollback()
+                venues.topstep_state = {"error": str(exc)[:200]}
+                log.warning("Topstep account check: %s", exc)
+
+    return (live_prices, trade, topstep_account)
+
+
+MARKETS_FUTURES = ("MES", "MNQ")

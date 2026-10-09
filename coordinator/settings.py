@@ -13,7 +13,7 @@ from psycopg.types.json import Jsonb
 
 from coordinator.events import add_audit
 
-JOB_KINDS = ("sleep", "data_refresh", "backtest", "paper_trade", "model_search")
+JOB_KINDS = ("sleep", "data_refresh", "backtest", "paper_trade", "model_search", "final_check")
 
 
 def get_settings(conn: psycopg.Connection) -> dict[str, Any]:

@@ -35,7 +35,7 @@ METRICS = (
     ("trades", "Trades", "How many trades these results are based on. Under about 100, the numbers could just be luck."),
     ("avg_hold_s", "Average hold", "How long the model usually keeps a position before selling."),
 )
-MARKET_TEXT = {"stocks": "Stocks", "crypto": "Crypto"}
+MARKET_TEXT = {"stocks": "Stocks", "crypto": "Crypto", "futures": "Futures"}
 SPARK_POINTS = 40
 
 
@@ -211,7 +211,7 @@ def detail(m: dict[str, Any], paper: dict[str, Any] | None = None) -> dict[str, 
 def models_page(conn: psycopg.Connection, selected_id: str | None = None,
                 paper: dict[str, dict[str, Any]] | None = None, search: dict[str, Any] | None = None) -> dict[str, Any]:
     """The list (ranked) and the selected model (the first in the list by default)."""
-    all_models = list_models(conn, include_retired=True)
+    all_models = [m for m in list_models(conn, include_retired=True) if m["market"] != "futures"]
     starts = get_setting(conn, "held_out_start", None) or {}
     rows = ranked([list_row(m, starts) for m in all_models])
     by_id = {m["id"]: m for m in all_models}

@@ -51,6 +51,8 @@ def fleet(request: Request, conn: psycopg.Connection = DB) -> dict[str, Any]:
 def create_job(body: JobBody, request: Request, conn: psycopg.Connection = DB) -> dict[str, Any]:
     """Assign a job. target: "auto", "all_idle" or a worker id. The confirmation line
     the dashboard shows comes back in `message`."""
+    if body.kind == "futures_prices":  # a Data refresh of the futures market only (Models screen, Futures)
+        body.kind, body.params = "data_refresh", {"markets": ["futures"]}
     if body.kind != "sleep" and body.kind not in fleet_view.AVAILABLE_KINDS:
         raise BadRequest(f"{fleet_view.JOB_LABELS.get(body.kind, body.kind)} jobs are not available in this build yet")
     if body.kind in fleet_view.NEEDS_MODEL and not body.model_id:
@@ -60,13 +62,15 @@ def create_job(body: JobBody, request: Request, conn: psycopg.Connection = DB) -
     if body.kind == "model_search":
         from coordinator import search
 
-        return jsonable(search.start(conn, request.app.state.limits, body.params.get("markets"), body.target))
+        return jsonable(search.start(conn, request.app.state.limits, body.params.get("markets"), body.target,
+                                     request.app.state.topstep))
     if body.kind == "paper_trade":
         from coordinator.api.trading import StartBody, start_paper_trading
 
         return jsonable(start_paper_trading(conn, request, body.model_id, StartBody(target=body.target,
                                                                                      confirm=body.params.get("confirm"))))
-    params = models.job_params(conn, body.kind, body.model_id, body.params, request.app.state.limits)
+    params = models.job_params(conn, body.kind, body.model_id, body.params, request.app.state.limits,
+                               request.app.state.topstep)
     result = queue.create_job(conn, body.kind, params, body.target, body.model_id, body.idempotency_key)
     names = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM workers").fetchall()}
     lines = [_job_line(j, names) for j in result.jobs]

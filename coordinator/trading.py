@@ -77,6 +77,9 @@ def start(conn: psycopg.Connection, model_id: str, mode: str, limits: Limits) ->
     """Open a book for the model and set it to Paper trading. The caller creates the
     paper_trade job and stores its id with attach_job()."""
     model = get_model(conn, model_id)
+    if model["market"] == "futures":
+        raise Conflict("Futures models paper trade from the Models screen's Futures view (Start paper trading on "
+                       "Alpaca), never through the stock and crypto books")
     if model["status"] == "retired":
         raise Conflict("This model is retired")
     if model["metrics"] is None:

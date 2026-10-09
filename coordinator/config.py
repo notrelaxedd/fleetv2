@@ -1,7 +1,7 @@
 """Coordinator configuration loaded from environment variables (the .env file on box1).
 
-Alpaca keys are read here and only here; nothing else in the repository sees them,
-and no worker ever receives them."""
+Alpaca, Databento and TopstepX keys are read here and only here; nothing else in the repository
+sees them, and no worker ever receives them."""
 from __future__ import annotations
 
 import os
@@ -55,6 +55,17 @@ class Config:
     # Stock price feed: "iex" (free, the default) or "sip" (Alpaca's paid consolidated
     # feed; a paid source, so only with the owner's OK).
     alpaca_data_feed: str = "iex"
+    # Futures prices (CME micro index futures, for Topstep research). Databento is a
+    # paid, pay-as-you-go source; without a key the coordinator uses the free SPY/QQQ
+    # stand-in from Alpaca, labelled "proxy" everywhere.
+    databento_api_key: str = field(default="", repr=False)
+    topstep_path: Path = REPO_ROOT / "config" / "topstep.toml"
+    # TopstepX (the ProjectX API) for futures models that are ready for a Combine. Off
+    # unless both keys are here AND the owner typed the confirmation on the dashboard.
+    topstepx_username: str = field(default="", repr=False)
+    topstepx_api_key: str = field(default="", repr=False)
+    topstepx_account: str = ""
+    topstepx_api_url: str = "https://api.topstepx.com"
 
     def __post_init__(self) -> None:
         if not self.allowed_origins:
@@ -85,6 +96,12 @@ class Config:
             alpaca_live_secret=env.get("ALPACA_LIVE_SECRET_KEY", "").strip(),
             fake_broker=_as_bool(env.get("FLEET_FAKE_BROKER", "")),
             alpaca_data_feed=(env.get("ALPACA_DATA_FEED", "iex").strip().lower() or "iex"),
+            databento_api_key=env.get("DATABENTO_API_KEY", "").strip(),
+            topstep_path=Path(env.get("FLEET_TOPSTEP_FILE", str(REPO_ROOT / "config" / "topstep.toml"))),
+            topstepx_username=env.get("TOPSTEPX_USERNAME", "").strip(),
+            topstepx_api_key=env.get("TOPSTEPX_API_KEY", "").strip(),
+            topstepx_account=env.get("TOPSTEPX_ACCOUNT", "").strip(),
+            topstepx_api_url=(env.get("TOPSTEPX_API_URL", "").strip() or "https://api.topstepx.com").rstrip("/"),
         )
 
     @property

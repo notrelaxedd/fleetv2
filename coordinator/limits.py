@@ -21,6 +21,9 @@ class Limits:
     max_per_model: float = 10_000.0
     daily_loss_limit_pct: float = 2.0
     hot_temp_c: float = 80.0
+    # Futures models paper trading on Alpaca (SPY/QQQ shares standing in for contracts).
+    futures_paper_max_contracts: float = 2.0
+    futures_paper_max_dollars: float = 150_000.0
 
 
 RANGES: dict[str, tuple[str, float, float]] = {
@@ -29,6 +32,8 @@ RANGES: dict[str, tuple[str, float, float]] = {
     "max_per_model": ("money", 1.0, 10_000_000.0),
     "daily_loss_limit_pct": ("safety", 0.1, 50.0),
     "hot_temp_c": ("fleet", 30.0, 120.0),
+    "futures_paper_max_contracts": ("futures", 1.0, 50.0),
+    "futures_paper_max_dollars": ("futures", 1_000.0, 10_000_000.0),
 }
 
 

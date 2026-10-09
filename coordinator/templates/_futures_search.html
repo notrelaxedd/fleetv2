@@ -1,0 +1,7 @@
+<p class="small fprices" data-futures-prices data-proxy="{{ 'true' if prices.proxy else 'false' }}">{{ prices.text }}</p>
+{% if prices.proxy %}<p class="muted small" data-proxy-note>Stand-in or made-up prices are for building and testing. They never count toward a "ready for a Combine" verdict.</p>{% endif %}
+<button type="button" class="btn wide" data-action="futures-prices">Load futures prices</button>
+<button type="button" class="btn solid wide" data-action="{{ 'search-stop' if search.running else 'search-start' }}" data-market="futures" data-running="{{ 'true' if search.running else 'false' }}"{% if fee_note and not search.running %} disabled{% endif %}>{{ search.button }}</button>
+{% if fee_note %}<p class="small fnote" data-fee-note>{{ fee_note }}</p>{% endif %}
+{% if search.detail %}<p class="muted small" data-search-detail>{{ search.detail }}</p>{% endif %}
+{% if tries_line %}<p class="muted small" data-tries>{{ tries_line }}</p>{% endif %}

@@ -5,7 +5,8 @@ only asks it to refresh each symbol of the chosen markets (POST /api/v1/data/ref
 so the progress shows on the Fleet screen. Nothing is written to disk and the job never
 talks to Alpaca. Standard library only.
 
-params: {"markets": ["stocks", "crypto"]} (default both). checkpoint:
+params: {"markets": ["stocks", "crypto"]} (default both; "futures" refreshes MES and MNQ
+1-minute bars, a month of one symbol per step). checkpoint:
 {"symbol_index": i, "bars_added": n, "errors": {...}}, i being the symbol in progress
 (a resumed job starts there again; refreshing a symbol twice is harmless).
 """
@@ -23,6 +24,7 @@ STEP_TIMEOUT = 90.0  # one step may wait in the coordinator's Alpaca rate limite
 RETRIES = 3  # attempts per call for a 5xx answer or a lost connection
 RETRY_PAUSE = 1.5  # seconds before the second attempt, doubled before the third
 MAX_STEPS_PER_SYMBOL = 100  # crypto windows are 120 days; far more than any real history needs
+MAX_FUTURES_STEPS = 250  # futures windows are 31 days: about 90 steps cover the 7 years since 2019
 
 _sleep: Callable[[float], None] = time.sleep  # replaced in tests
 
@@ -31,9 +33,13 @@ def _markets(params: dict[str, Any]) -> list[str]:
     raw = params.get("markets") or ["stocks", "crypto"]
     names = [raw] if isinstance(raw, str) else list(raw)
     for name in names:
-        if name not in universe.MARKETS:
+        if name not in universe.MARKETS and name != "futures":
             raise ValueError(f"unknown market {name!r}")
     return names
+
+
+def _symbols(market: str) -> tuple[str, ...]:
+    return universe.FUTURES["symbols"] if market == "futures" else universe.MARKETS[market]["symbols"]
 
 
 def _parse(value: Any) -> datetime | None:
@@ -77,7 +83,7 @@ def run_data_refresh(
     context = params.get("_context") or {}
     url = str(context.get("host_url", "")).rstrip("/") + "/api/v1/data/refresh-step"
     token = str(context.get("worker_token", ""))
-    todo = [(m, s) for m in _markets(params) for s in universe.MARKETS[m]["symbols"]]
+    todo = [(m, s) for m in _markets(params) for s in _symbols(m)]
     total = len(todo)
 
     start_index = 0
@@ -97,7 +103,7 @@ def run_data_refresh(
         cursor: str | None = None
         base: datetime | None = None  # where this symbol's first step started (crypto progress)
         closed = False  # the symbol's closing progress line was emitted
-        for _ in range(MAX_STEPS_PER_SYMBOL):
+        for _ in range(MAX_FUTURES_STEPS if market == "futures" else MAX_STEPS_PER_SYMBOL):
             if should_stop():
                 raise JobStopped()
             body: dict[str, Any] = {"market": market, "symbol": symbol}
