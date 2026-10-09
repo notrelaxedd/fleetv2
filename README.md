@@ -210,8 +210,32 @@ description is written from its blocks.
 
 Each building block uses only the bar itself and earlier bars, and
 `tests/test_futures_recipes.py` runs the cut-off test on every block and on many random
-recipes. Claude Haiku putting recipes together is the next step: see
-`docs/AI_PLAN.md`.
+recipes.
+
+### Claude Haiku writing recipes
+
+With a Claude API key, Claude Haiku 5.5 also writes recipes while a futures model search
+runs (`coordinator/ai_ideas.py`, plan in `docs/AI_PLAN.md`). To turn it on, put the key in
+`.env` on box1 (only the coordinator reads it) and run `docker compose up -d coordinator`:
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+- Haiku is shown the building blocks and every recipe tried so far with its **training**
+  results only (best score, days traded, profit at double costs). Held-out and lockbox
+  results never reach it, so it cannot tune its ideas to the tests that judge them.
+- Its answer has a fixed shape (structured output), and each recipe must pass the same
+  checks as a random one. Nothing it writes is ever run as code.
+- Each search round takes up to three of its recipes **beside** the round's random ones,
+  so the Futures view can show how many recipe models each has kept.
+- Every call's cost is recorded. `config/ai.toml` sets a monthly cap ($5 to start), the
+  model, how many recipes per call, at most six calls an hour, and the prices it counts
+  with. A call is only made when the month's spend plus the most it could cost stays
+  under the cap. At about $0.001 a call, $5 covers thousands of calls.
+- The Futures view says whether Haiku is on, what it has written and kept this month,
+  what it has cost against the cap, and the last problem if a call failed. A model whose
+  recipe Haiku wrote says so on its page, with Haiku's one sentence on the idea.
 
 ## Futures on the Models screen
 

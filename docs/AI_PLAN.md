@@ -1,6 +1,6 @@
 # Claude Haiku in the fleet: plan
 
-Status: written 2026-10-09. Stage A in progress (see the bottom of this file).
+Status: written 2026-10-09. Stages A and B built (see the bottom of this file).
 
 Goal: use Claude Haiku 5.5 to give model search new ideas to test, and to explain what
 it finds, without weakening the one promise this software makes: a model only reaches
@@ -130,8 +130,9 @@ The default cap is $5 a month, set in `config/ai.toml`.
 
 ## 5. Build order and status
 
-1. Stage A: building blocks, recipes, cut-off test, recipes in model search. In
-   progress.
-2. Stage B: the Haiku idea writer, with the cap and the spend count.
+1. Stage A: building blocks, recipes, cut-off test, recipes in model search. Built.
+2. Stage B: the Haiku idea writer, with the cap and the spend count. Built: it runs on
+   box1 once ANTHROPIC_API_KEY is in .env; tested with a stand-in for Anthropic, so the
+   first real calls are worth watching on the Futures view.
 3. Stage C: reviews.
 4. Stage D: the market note, as an experiment.

@@ -21,7 +21,10 @@ Each round, for each futures model file, and for recipes (fleet2/models/futures/
 
 Recipes: every round adds a few new recipes (random mixes of building blocks, seeded
 like everything else, e.g. "77:3:recipe:1"), each tried with a full set of candidates,
-and keeps tuning the recipes of models already kept, with fewer candidates each.
+and keeps tuning the recipes of models already kept, with fewer candidates each. When
+Claude Haiku has written recipes (coordinator.ai_ideas), the round also takes a few of
+those, beside the random ones, and reports every recipe's TRAINING numbers back, so
+Haiku learns from them. Held-out numbers are never reported there.
 
 Candidates run in a process pool on every core. The training prices are downloaded
 once and kept until the coordinator's ETag changes. A stop ends the pool at once.
@@ -47,6 +50,7 @@ from fleet2.worker import futures_jobs
 
 DEFAULT_CANDIDATES = 16
 DEFAULT_NEW_RECIPES = 3  # new random recipes per round
+DEFAULT_IDEAS = 3  # Haiku recipes asked for per round (the coordinator may send fewer, or none)
 ROBUST_SHARE = 0.5  # the median neighbour must score at least half the winner
 
 _STATE: dict[str, Any] = {}
@@ -162,6 +166,14 @@ def robust(scorer: Scorer, winner: dict[str, Any], should_stop: Callable[[], boo
 # ------------------------------------------------------------------ the job
 
 
+def _valid(raw: Any) -> bool:
+    try:
+        recipe.validate(raw)
+        return True
+    except recipe.BadRecipe:
+        return False
+
+
 def _kept(host: str, token: str) -> dict[str, list[dict[str, Any]]]:
     rows = http.get_json(f"{host}/api/v1/models/kept?market=futures", token=token, timeout=30.0) or []
     out: dict[str, list[dict[str, Any]]] = {}
@@ -171,10 +183,12 @@ def _kept(host: str, token: str) -> dict[str, list[dict[str, Any]]]:
 
 
 def families(seed: int, round_no: int, files: list[str], per_file: int, new_recipes: int,
-             kept: dict[str, list[dict[str, Any]]]) -> tuple[list[dict[str, Any]], list[str]]:
+             kept: dict[str, list[dict[str, Any]]],
+             ideas: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
     """This round's candidates, and the model files and recipes they belong to: every
-    file; every recipe that has kept models (fewer candidates each); and `new_recipes`
-    new random recipes (a full set each, none of them already kept)."""
+    file; every recipe that has kept models (fewer candidates each); Haiku's recipes
+    (`ideas`, a full set each); and `new_recipes` new random recipes (a full set each,
+    none already in the round)."""
     tasks: list[dict[str, Any]] = []
     names: list[str] = []
     for name in files:
@@ -184,6 +198,15 @@ def families(seed: int, round_no: int, files: list[str], per_file: int, new_reci
         module = module_for(name, kept[name][0]["params"])
         tasks += proposals(seed, round_no, name, max(2, per_file // 4), kept[name], module)
         names.append(name)
+    for idea in ideas or []:
+        try:
+            module = recipe.family(idea["recipe"])
+        except (recipe.BadRecipe, KeyError, TypeError):
+            continue
+        if module.__name__ in names:
+            continue
+        tasks += proposals(seed, round_no, module.__name__, per_file, [], module)
+        names.append(module.__name__)
     for i in range(new_recipes):
         mix = recipe.random_recipe(random.Random(f"{seed}:{round_no}:recipe:{i}"))
         module = recipe.family(mix)
@@ -192,6 +215,38 @@ def families(seed: int, round_no: int, files: list[str], per_file: int, new_reci
         tasks += proposals(seed, round_no, module.__name__, per_file, [], module)
         names.append(module.__name__)
     return tasks, names
+
+
+def _ideas(host: str, token: str, job_id: Any, count: int) -> list[dict[str, Any]]:
+    """Haiku's waiting recipes for this round ([] when there are none, or on any problem:
+    the search never waits for them)."""
+    if count <= 0:
+        return []
+    try:
+        got = http.post_json(f"{host}/api/v1/search/ideas", {"job_id": job_id, "take": count}, token=token, timeout=30.0)
+    except Exception:  # noqa: BLE001 - an older coordinator, or a hiccup: carry on with random recipes
+        return []
+    return [i for i in (got or []) if isinstance(i, dict) and "recipe" in i and "id" in i]
+
+
+def recipe_results(results: list[dict[str, Any]], names: list[str],
+                   idea_of: dict[str, int]) -> list[dict[str, Any]]:
+    """Per recipe in the round: how many settings were tried and the best one's TRAINING
+    numbers (score, gates, days traded, profit at double and normal costs)."""
+    out = []
+    for name in names:
+        if not recipe.is_recipe(name):
+            continue
+        rows = [r for r in results if r["name"] == name]
+        if not rows:
+            continue
+        scored = [r for r in rows if r.get("score") is not None]
+        best = max(scored, key=lambda r: r["score"]) if scored else rows[0]
+        out.append({"name": name, "recipe": best["params"]["recipe"], "idea_id": idea_of.get(name),
+                    "tried": len(rows), "best_score": best.get("score"),
+                    "passes": any(r.get("passes") for r in rows), "days_traded": best.get("days_traded"),
+                    "pnl_double": best.get("pnl_double"), "pnl_normal": best.get("pnl_normal")})
+    return out
 
 
 def run_futures_search(params: dict[str, Any], checkpoint: dict[str, Any] | None, emit: Any, should_stop: Any) -> dict[str, Any]:
@@ -205,6 +260,7 @@ def run_futures_search(params: dict[str, Any], checkpoint: dict[str, Any] | None
     per_file = max(2, int(params.get("candidates") or DEFAULT_CANDIDATES))
     files = [n for n in (params.get("files") or sorted(REGISTRY)) if n in REGISTRY]
     new_recipes = max(0, int(params.get("new_recipes", DEFAULT_NEW_RECIPES)))
+    ideas_per_round = max(0, int(params.get("ideas", DEFAULT_IDEAS)))
     processes = int(params.get("processes") or os.cpu_count() or 1)
     cache: PriceCache = params.get("_cache") or PriceCache(ctx)
     round_no = int((checkpoint or {}).get("round") or 0)
@@ -224,7 +280,9 @@ def run_futures_search(params: dict[str, Any], checkpoint: dict[str, Any] | None
                     scorer.close()
                 scorer = Scorer(train, rules, processes)
             kept = _kept(host, token)
-            tasks, names = families(seed, round_no, files, per_file, new_recipes, kept)
+            ideas = _ideas(host, token, params.get("_job_id"), ideas_per_round)
+            idea_of = {recipe.name_of(i["recipe"]): int(i["id"]) for i in ideas if _valid(i["recipe"])}
+            tasks, names = families(seed, round_no, files, per_file, new_recipes, kept, ideas)
 
             def progress(done: int, total: int = len(tasks)) -> None:
                 emit({"round": round_no, "kept": kept_total, "tried": tried_total + done}, 0.8 * done / total,
@@ -239,7 +297,8 @@ def run_futures_search(params: dict[str, Any], checkpoint: dict[str, Any] | None
                 t["n"] += 1
                 t["sum"] += sr
                 t["sq"] += sr * sr
-            http.post_json(f"{host}/api/v1/search/tries", {"job_id": params.get("_job_id"), "tries": tries},
+            http.post_json(f"{host}/api/v1/search/tries", {"job_id": params.get("_job_id"), "tries": tries,
+                                                           "recipes": recipe_results(results, names, idea_of)},
                            token=token, timeout=30.0)
             for name in names:
                 good = [r for r in results if r["name"] == name and r.get("passes") and (r.get("score") or 0) > 0]
@@ -262,6 +321,7 @@ def run_futures_search(params: dict[str, Any], checkpoint: dict[str, Any] | None
                 reply = http.post_json(f"{host}/api/v1/models/futures", {
                     "job_id": params.get("_job_id"), "module": name, "params": winner["params"],
                     "train_score": winner["score"], "seed": winner["seed"], "parent": winner["parent"],
+                    "idea_id": idea_of.get(name),
                     "metrics": {"market": "futures", "feed": held.feed, "periods": periods, "params": winner["params"],
                                 "train": trained, "held_out": result,
                                 "summary": futures_jobs.summary_line(trained, result)},

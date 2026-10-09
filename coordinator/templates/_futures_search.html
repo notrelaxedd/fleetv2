@@ -5,3 +5,4 @@
 {% if fee_note %}<p class="small fnote" data-fee-note>{{ fee_note }}</p>{% endif %}
 {% if search.detail %}<p class="muted small" data-search-detail>{{ search.detail }}</p>{% endif %}
 {% if tries_line %}<p class="muted small" data-tries>{{ tries_line }}</p>{% endif %}
+{% if haiku %}<p class="small{% if haiku.tone == 'warn' %} fnote{% else %} muted{% endif %}" data-haiku>{{ haiku.text }}</p>{% endif %}

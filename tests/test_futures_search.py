@@ -218,10 +218,12 @@ def test_the_pool_scores_like_one_process_and_stops_at_once(full, periods):
 class Coordinator:
     """The coordinator's search routes, recorded."""
 
-    def __init__(self, kept=None):
+    def __init__(self, kept=None, ideas=None):
         self.kept = kept or []
+        self.ideas = list(ideas or [])
         self.found: list[dict] = []
         self.tries: list[dict] = []
+        self.recipes: list[list[dict]] = []
 
     def get_json(self, url, token=None, timeout=None):
         assert url.endswith("/api/v1/models/kept?market=futures")
@@ -230,7 +232,11 @@ class Coordinator:
     def post_json(self, url, body, token=None, timeout=None):
         if url.endswith("/api/v1/search/tries"):
             self.tries.append(body["tries"])
+            self.recipes.append(body.get("recipes") or [])
             return {"ok": True}
+        if url.endswith("/api/v1/search/ideas"):
+            given, self.ideas = self.ideas[:body["take"]], self.ideas[body["take"]:]
+            return given
         assert url.endswith("/api/v1/models/futures")
         self.found.append(body)
         return {"kept": True, "id": f"{body['module']}-s{len(self.found)}"}
@@ -363,6 +369,27 @@ def test_every_round_tries_new_recipes_and_counts_them_together(monkeypatch, edg
     for body in coordinator.found:
         if R.is_recipe(body["module"]):
             assert body["params"]["recipe"] and R.name_of(body["params"]["recipe"]) == body["module"]
+
+
+def test_a_round_tries_haiku_recipes_beside_random_ones_and_reports_training_numbers(monkeypatch, edge, periods):
+    mixes = [R.random_recipe(random.Random(f"haiku idea {i}")) for i in range(2)]
+    ideas = [{"id": 70 + i, "family": R.name_of(m), "recipe": m, "note": "an idea"} for i, m in enumerate(mixes)]
+    coordinator = Coordinator(ideas=ideas)
+    search(monkeypatch, FakeCache(edge, periods), coordinator, periods, rounds=1, robust_share=-1e9, new_recipes=1)
+    reported = coordinator.recipes[0]
+    by_name = {r["name"]: r for r in reported}
+    for idea in ideas:
+        entry = by_name[idea["family"]]
+        assert entry["idea_id"] == idea["id"] and entry["tried"] == 4  # a full set of candidates each
+        assert entry["recipe"] == idea["recipe"]
+    randoms = [r for r in reported if r["idea_id"] is None]
+    assert len(randoms) == 1  # the round's one random recipe, beside them
+    allowed = {"name", "recipe", "idea_id", "tried", "best_score", "passes", "days_traded", "pnl_double", "pnl_normal"}
+    assert all(set(r) == allowed for r in reported)  # training numbers only, never held-out ones
+    assert coordinator.tries[0]["recipe"]["n"] == 12
+    for body in coordinator.found:
+        if body["module"] in by_name:
+            assert body["idea_id"] == by_name[body["module"]]["idea_id"]
 
 
 def test_kept_recipes_keep_being_tuned(monkeypatch, full, periods):

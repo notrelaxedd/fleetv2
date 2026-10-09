@@ -181,9 +181,13 @@ def store_found(conn: psycopg.Connection, worker_id: str | None, body: dict[str,
     metrics.update(train_score=score, seed=body.get("seed"), parent=body.get("parent"), found_by=worker_id,
                    job_id=body.get("job_id"))
     if recipe.is_recipe(name):  # who put the recipe together: a random mix, or Claude Haiku (stage B)
-        metrics["recipe_by"] = "haiku" if body.get("idea_id") else "random"
-        if body.get("idea_id"):
-            metrics["idea_id"] = str(body["idea_id"])
+        idea = None
+        if body.get("idea_id") is not None:
+            idea = conn.execute("SELECT id, note FROM recipe_ideas WHERE id = %s AND family = %s AND by = 'haiku'",
+                                (int(body["idea_id"]), name)).fetchone()
+        metrics["recipe_by"] = "haiku" if idea else "random"
+        if idea:
+            metrics.update(idea_id=int(idea["id"]), idea=idea["note"] or "")
     conn.execute(
         """
         INSERT INTO models (id, name, module, market, description, how_it_works, params, status, origin, metrics, backtested_at)

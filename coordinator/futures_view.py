@@ -406,6 +406,8 @@ def detail(m: dict[str, Any], rules: topstep.Rules, tries: dict[str, Any], check
         if metrics.get("recipe_by"):
             maker = "Claude Haiku" if metrics["recipe_by"] == "haiku" else "a random mix of building blocks"
             origin += f" · recipe put together by {maker}"
+            if metrics.get("idea"):
+                origin += f' · Haiku\'s idea: "{metrics["idea"]}"'
     out: dict[str, Any] = {
         "id": m["id"], "name": m["name"], "tags": tags, "warn_tags": {"Proxy prices", "Synthetic prices",
                                                                       "Rules changed: backtest again"},
