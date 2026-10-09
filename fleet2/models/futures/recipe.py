@@ -455,14 +455,16 @@ def structure_breaks(s: Any, bars: Bars, n: int) -> tuple[np.ndarray, np.ndarray
     return up, down, turned
 
 
-def order_block_retests(s: Any, bars: Bars, n: int, max_bars: int) -> tuple[np.ndarray, np.ndarray]:
+def order_block_retests(s: Any, bars: Bars, n: int, max_bars: int,
+                        breaks: tuple[np.ndarray, np.ndarray] | None = None) -> tuple[np.ndarray, np.ndarray]:
     """(up, down) per bar: retests of the day's latest order block.
 
     When the price breaks structure upward, the order block is the last falling bar
     (close below open) before the break, from its low to its high. "up" at a later bar:
     the price dips back into that block and holds (_zone_retest). A downward break's
-    order block is the last rising bar before it; "down" is the mirror image."""
-    up_break, down_break, _ = structure_breaks(s, bars, n)
+    order block is the last rising bar before it; "down" is the mirror image. `breaks`
+    (up, down) replaces the structure breaks (n is then unused)."""
+    up_break, down_break = breaks if breaks is not None else structure_breaks(s, bars, n)[:2]
     falling, rising = s.close < s.open, s.close > s.open
     top_up = _previous(f.latest_today(s.high, falling, bars), bars)
     bottom_up = _previous(f.latest_today(s.low, falling, bars), bars)
@@ -482,6 +484,26 @@ def liquidity_sweeps(s: Any, bars: Bars) -> tuple[np.ndarray, np.ndarray]:
     high, low = f.previous_high_low(s, bars)
     with np.errstate(invalid="ignore"):
         return (s.low < low) & (s.close > low), (s.high > high) & (s.close < high)
+
+
+def smart_money_sequence(s: Any, bars: Bars, n: int, max_bars: int, sweep_bars: int) -> tuple[np.ndarray, np.ndarray]:
+    """(up, down) per bar: the full sequence, in order, on the same day.
+
+    "up": the price sweeps yesterday's low (liquidity_sweeps); within `sweep_bars` bars
+    of that, with no sweep of yesterday's high in between, it breaks a swing high
+    against the day's last break (a change of character, structure_breaks); then it dips
+    back into that break's order block and holds (order_block_retests). "down" is the
+    mirror image."""
+    k = np.arange(bars.n, dtype=float)
+    sweep_up, sweep_down = liquidity_sweeps(s, bars)
+    up_break, down_break, turned = structure_breaks(s, bars, n)
+    with np.errstate(invalid="ignore"):
+        last = f.latest_today(np.where(sweep_up, 1.0, -1.0), sweep_up | sweep_down, bars)
+        since = k - f.latest_today(k, sweep_up | sweep_down, bars)
+        recent = since <= int(sweep_bars)
+        armed_up = up_break & turned & (last == 1.0) & recent
+        armed_down = down_break & turned & (last == -1.0) & recent
+    return order_block_retests(s, bars, n, max_bars, breaks=(armed_up, armed_down))
 
 
 def _signal(r: dict[str, Any], s: Any, bars: Bars, p: dict[str, Any], normal: np.ndarray,

@@ -21,9 +21,10 @@ def get_module(name: str) -> ModuleType:
     """The model file by name (stock and crypto files, then futures files); KeyError
     names the known ones."""
     from fleet2.models.futures import REGISTRY as FUTURES
+    from fleet2.models.futures import get_module as futures_module
 
     try:
-        return REGISTRY[name] if name in REGISTRY else FUTURES[name]
+        return REGISTRY[name] if name in REGISTRY else futures_module(name)
     except KeyError:
         known = ", ".join(sorted(REGISTRY) + sorted(FUTURES))
         raise KeyError(f"unknown model file {name!r} (known: {known})") from None

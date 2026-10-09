@@ -4,5 +4,6 @@
 <button type="button" class="btn solid wide" data-action="{{ 'search-stop' if search.running else 'search-start' }}" data-market="futures" data-running="{{ 'true' if search.running else 'false' }}"{% if fee_note and not search.running %} disabled{% endif %}>{{ search.button }}</button>
 {% if fee_note %}<p class="small fnote" data-fee-note>{{ fee_note }}</p>{% endif %}
 {% if search.detail %}<p class="muted small" data-search-detail>{{ search.detail }}</p>{% endif %}
+{% if search.shares and search.shares|length > 1 %}<ul class="muted small rlist" data-search-shares>{% for line in search.shares %}<li>{{ line }}</li>{% endfor %}</ul>{% endif %}
 {% if tries_line %}<p class="muted small" data-tries>{{ tries_line }}</p>{% endif %}
 {% if haiku %}<p class="small{% if haiku.tone == 'warn' %} fnote{% else %} muted{% endif %}" data-haiku>{{ haiku.text }}</p>{% endif %}

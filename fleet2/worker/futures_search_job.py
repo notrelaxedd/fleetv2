@@ -26,6 +26,9 @@ Claude Haiku has written recipes (coordinator.ai_ideas), the round also takes a 
 those, beside the random ones, and reports every recipe's TRAINING numbers back, so
 Haiku learns from them. Held-out numbers are never reported there.
 
+With several workers, each searches its own share (the coordinator splits them when the
+search starts): one takes the recipes, the others split the model files.
+
 Candidates run in a process pool on every core. The training prices are downloaded
 once and kept until the coordinator's ETag changes. A stop ends the pool at once.
 """
@@ -258,9 +261,15 @@ def run_futures_search(params: dict[str, Any], checkpoint: dict[str, Any] | None
     periods = params["periods"]
     seed = int(params.get("seed") or 1)
     per_file = max(2, int(params.get("candidates") or DEFAULT_CANDIDATES))
-    files = [n for n in (params.get("files") or sorted(REGISTRY)) if n in REGISTRY]
-    new_recipes = max(0, int(params.get("new_recipes", DEFAULT_NEW_RECIPES)))
-    ideas_per_round = max(0, int(params.get("ideas", DEFAULT_IDEAS)))
+    # This worker's share of the search (coordinator.futures_models.shares): some model
+    # files, recipes or both. A file the worker no longer knows is skipped; an empty
+    # share (after an update) falls back to everything.
+    files = [n for n in (params["files"] if "files" in params else sorted(REGISTRY)) if n in REGISTRY]
+    with_recipes = bool(params.get("recipes", True))
+    if not files and not with_recipes:
+        files, with_recipes = sorted(REGISTRY), True
+    new_recipes = max(0, int(params.get("new_recipes", DEFAULT_NEW_RECIPES))) if with_recipes else 0
+    ideas_per_round = max(0, int(params.get("ideas", DEFAULT_IDEAS))) if with_recipes else 0
     processes = int(params.get("processes") or os.cpu_count() or 1)
     cache: PriceCache = params.get("_cache") or PriceCache(ctx)
     round_no = int((checkpoint or {}).get("round") or 0)
@@ -280,6 +289,8 @@ def run_futures_search(params: dict[str, Any], checkpoint: dict[str, Any] | None
                     scorer.close()
                 scorer = Scorer(train, rules, processes)
             kept = _kept(host, token)
+            if not with_recipes:  # another worker tunes the kept recipes
+                kept = {n: v for n, v in kept.items() if not recipe.is_recipe(n)}
             ideas = _ideas(host, token, params.get("_job_id"), ideas_per_round)
             idea_of = {recipe.name_of(i["recipe"]): int(i["id"]) for i in ideas if _valid(i["recipe"])}
             tasks, names = families(seed, round_no, files, per_file, new_recipes, kept, ideas)

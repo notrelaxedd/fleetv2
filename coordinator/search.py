@@ -3,7 +3,8 @@ find, and the status line for the Models screen.
 
 Start model search sends one search job to every idle worker (at least one job, which
 waits for a free worker otherwise), each with its own seed so they never try the same
-settings. Stop model search cancels them all.
+settings. A futures search also gives each worker its own share of the strategies
+(futures_models.shares). Stop model search cancels them all.
 
 Found models are kept sparingly so the list stays readable: at most KEEP_PER_FILE
 search models per model file stay active. A new find replaces the weakest one only when
@@ -60,10 +61,19 @@ def _start(conn: psycopg.Connection, params: dict[str, Any], target: str, label:
         target = "auto"
     if target == "all_idle":
         workers = queue.idle_workers(conn)
+        futures = params.get("markets") == ["futures"]
+        if futures:  # each worker searches its own share of the strategies
+            from coordinator import futures_models
+
+            parts = futures_models.shares(len(workers))
         jobs = []
-        for w in workers:
-            jobs += queue.create_job(conn, "model_search", {**params, "seed": secrets.randbelow(10**9)}, w["id"]).jobs
-        return {"jobs": jobs, "message": f"{label} started on {len(jobs)} worker{'s' if len(jobs) != 1 else ''}"}
+        for i, w in enumerate(workers):
+            job_params = {**params, "seed": secrets.randbelow(10**9), **(parts[i] if futures else {})}
+            jobs += queue.create_job(conn, "model_search", job_params, w["id"]).jobs
+        message = f"{label} started on {len(jobs)} worker{'s' if len(jobs) != 1 else ''}"
+        if futures and len(jobs) > 1:
+            message += ", each on different strategies"
+        return {"jobs": jobs, "message": message}
     result = queue.create_job(conn, "model_search", {**params, "seed": secrets.randbelow(10**9)}, target)
     where = "waits for a free worker" if result.waiting else "started"
     return {"jobs": result.jobs, "message": f"{label} {where}"}
@@ -89,7 +99,22 @@ def search_status(conn: psycopg.Connection) -> dict[str, Any]:
     tried = sum(int((j["checkpoint"] or {}).get("tried") or 0) for j in jobs)
     detail = f"Searching on {active} worker{'s' if active != 1 else ''}" if active else "Waiting for a free worker"
     detail += f" · {tried:,} settings tried · {found} kept"
-    return {"running": True, "button": "Stop model search", "detail": detail}
+    return {"running": True, "button": "Stop model search", "detail": detail, "shares": _shares(conn, jobs)}
+
+
+def _shares(conn: psycopg.Connection, jobs: list[dict[str, Any]]) -> list[str]:
+    """"box2: Order block, Pullback" per futures search job split by strategy."""
+    from coordinator import futures_models
+
+    out = []
+    for j in sorted(jobs, key=lambda j: str(j["id"])):
+        p = j["params"] or {}
+        if p.get("markets") != ["futures"] or "files" not in p:
+            continue
+        wid = j["lease_worker_id"] or j["target_worker_id"]
+        w = conn.execute("SELECT name FROM workers WHERE id = %s", (wid,)).fetchone() if wid else None
+        out.append(f"{w['name'] if w else 'next free worker'}: {futures_models.share_text(p)}")
+    return out
 
 
 def store_found(conn: psycopg.Connection, worker_id: str, body: dict[str, Any]) -> dict[str, Any]:

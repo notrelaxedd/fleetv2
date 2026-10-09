@@ -242,7 +242,7 @@ class Coordinator:
         return {"kept": True, "id": f"{body['module']}-s{len(self.found)}"}
 
 
-def search(monkeypatch, cache, coordinator, periods, rounds=2, rules=RULES, robust_share=None, new_recipes=0):
+def search(monkeypatch, cache, coordinator, periods, rounds=2, rules=RULES, robust_share=None, new_recipes=0, **extra):
     monkeypatch.setattr(fs.http, "get_json", coordinator.get_json)
     monkeypatch.setattr(fs.http, "post_json", coordinator.post_json)
     if robust_share is not None:
@@ -254,7 +254,7 @@ def search(monkeypatch, cache, coordinator, periods, rounds=2, rules=RULES, robu
 
     params = {"_context": {"host_url": "http://h", "worker_token": "t"}, "markets": ["futures"], "seed": 4,
               "candidates": 4, "files": ["trend_day", "vwap_revert"], "processes": 1, "rules": rules.to_dict(),
-              "periods": periods, "_cache": cache, "_job_id": "job-1", "new_recipes": new_recipes}
+              "periods": periods, "_cache": cache, "_job_id": "job-1", "new_recipes": new_recipes, **extra}
     with pytest.raises(JobStopped):
         fs.run_futures_search(params, None, emit, lambda: bool(events) and max(e[0]["round"] for e in events) > rounds)
     return events
@@ -473,3 +473,15 @@ def test_chance_of_luck_grows_with_the_number_of_tries():
     assert futures_stats.expected_best(100, 0.01) < futures_stats.expected_best(10_000, 0.01)
     assert futures_stats.variance_from_sums(3, 6.0, 14.0) == pytest.approx(1.0)  # 1, 2, 3
     assert futures_stats.chance_of_luck(0.1, 2, 0, 3, 10, 0.01) is None
+
+
+def test_a_worker_searches_only_its_share(monkeypatch, edge, periods):
+    """One worker's share is recipes only, another's some files only: neither strays."""
+    coordinator = Coordinator()
+    search(monkeypatch, FakeCache(edge, periods), coordinator, periods, rounds=1, new_recipes=2,
+           files=[], recipes=True)
+    assert all(set(r) == {"recipe"} for r in coordinator.tries)
+    coordinator = Coordinator()
+    search(monkeypatch, FakeCache(edge, periods), coordinator, periods, rounds=1, new_recipes=2,
+           files=["trend_day"], recipes=False)
+    assert all(set(r) == {"trend_day"} for r in coordinator.tries)
