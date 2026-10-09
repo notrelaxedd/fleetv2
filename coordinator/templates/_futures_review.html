@@ -1,0 +1,23 @@
+{% set r = selected.review %}
+{% if r and r.state != "untested" %}
+<section class="card review" aria-labelledby="h-review" data-review data-state="{{ r.state }}"{% if r.verdict_key %} data-verdict="{{ r.verdict_key }}"{% endif %}>
+  <h3 class="section" id="h-review">Claude Haiku's review</h3>
+  {% if r.state == "off" %}
+  <p class="muted small" data-review-off>{{ r.text }}</p>
+  {% else %}
+  {% if r.state == "done" %}
+  <p class="rhead" data-review-headline><span class="tag" data-review-verdict>{{ r.verdict }}</span> {{ r.headline }}</p>
+  {% for key, title in [("luck", "What could be luck"), ("fragile", "What looks fragile"), ("watch", "What to watch on paper")] %}
+  {% if r[key] %}<h4 class="mlabel">{{ title }}</h4><ul class="small rlist" data-review-{{ key }}>{% for p in r[key] %}<li>{{ p }}</li>{% endfor %}</ul>{% endif %}
+  {% endfor %}
+  <p class="muted small" data-review-when>Written {{ r.when }}, asked for {{ r.asked_by }}.{% if r.stale %} The model's results have changed since.{% endif %} Advice only: it changes nothing.</p>
+  {% elif r.state == "waiting" %}
+  <p class="muted small" data-review-waiting>Claude Haiku is writing a review of this model. It appears here within a minute or two.</p>
+  {% else %}
+  <p class="muted small" data-review-none>No review yet.{% if r.auto %} Models that beat their coin flip, have a Final check or trade are reviewed automatically.{% endif %}</p>
+  {% endif %}
+  {% if r.failed %}<p class="small fnote" data-review-failed>{{ r.failed }}</p>{% endif %}
+  {% if not r.waiting %}<div class="mactions"><button type="button" class="btn" data-action="ask-review" data-model-id="{{ selected.id }}">{{ "Ask for a new review" if r.state == "done" else "Ask Claude Haiku for a review" }}</button></div>{% endif %}
+  {% endif %}
+</section>
+{% endif %}

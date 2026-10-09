@@ -256,6 +256,14 @@ button.pill[data-state="live"] { color: var(--warn); }
 .fprices[data-proxy="true"] { color: var(--warn); }
 .msearch .btn.wide + .btn.wide { margin-top: 8px; }
 .fnote { color: var(--warn); margin-top: 8px; }
+/* Claude Haiku: a model's review, and the daily market note */
+.review { padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; }
+.rhead { font-weight: 600; margin: 2px 0 4px; }
+.review[data-verdict="promising"] [data-review-verdict] { color: var(--accent); border-color: var(--accent); }
+.review[data-verdict="weak"] [data-review-verdict] { color: var(--loss); border-color: var(--loss); }
+.rlist, .notelist { margin: 0 0 4px; padding-left: 20px; display: flex; flex-direction: column; gap: 2px; }
+.mnotebox { display: flex; flex-direction: column; gap: 4px; }
+.mnotebox h3 { margin-bottom: 2px; }
 .fcheck { margin-top: 10px; font-weight: 600; }
 .verdict { padding: 14px 16px; }
 .vtext { font-weight: 600; margin: 4px 0 8px; }

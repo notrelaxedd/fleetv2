@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from markupsafe import Markup
 
-from coordinator import ai_ideas, charts, fleet_view, futures_view, models_view, search, trading_view, web
+from coordinator import ai_ideas, ai_reviews, charts, fleet_view, futures_view, market_note, models_view, search, trading_view, web
 from coordinator.api.deps import DB, require_owner
 
 router = APIRouter(dependencies=[Depends(require_owner)])
@@ -46,7 +46,12 @@ def _models_context(request: Request, conn: psycopg.Connection) -> dict[str, Any
     if request.query_params.get("market") == "futures":
         page = futures_view.futures_page(conn, request.app.state.topstep, request.query_params.get("id"),
                                          search=search.search_status(conn), venues=request.app.state.venues)
-        page["haiku"] = ai_ideas.status_line(conn, request.app.state.ai, request.app.state.ai_key)
+        ai, key = request.app.state.ai, request.app.state.ai_key
+        page["haiku"] = ai_ideas.status_line(conn, ai, key)
+        page["market_note"] = market_note.view(conn, ai, key, request.app.state.news)
+        if page["selected"]:
+            row = conn.execute("SELECT * FROM models WHERE id = %s", (page["selected"]["id"],)).fetchone()
+            page["selected"]["review"] = ai_reviews.view(conn, row, ai, key)
         parts = FUTURES_PARTS
     else:
         page = models_view.models_page(conn, request.query_params.get("id"), paper=trading_view.paper_summaries(conn),

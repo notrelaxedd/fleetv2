@@ -143,6 +143,8 @@
       which = "search";
     } else if (action === "final-check") {
       url = "/api/models/" + encodeURIComponent(id) + "/final-check";
+    } else if (action === "ask-review") {
+      url = "/api/models/" + encodeURIComponent(id) + "/review";
     } else if (action === "futures-start" || action === "futures-stop") {
       url = "/api/models/" + encodeURIComponent(id) + "/futures/" + (action === "futures-start" ? "start" : "stop");
       body = { venue: button.dataset.venue };
@@ -176,7 +178,7 @@
         if (!r.ok) { toast(r.message, false); }
         return refresh();
       });
-    } else if (/^(search-(start|stop)|run-backtest|paper-(start|stop)|futures-prices|final-check|futures-(start|stop)|topstep-resume)$/.test(action)) {
+    } else if (/^(search-(start|stop)|run-backtest|paper-(start|stop)|futures-prices|final-check|ask-review|futures-(start|stop)|topstep-resume)$/.test(action)) {
       modelsAction(button, action);
     } else if (action === "run-again") {
       button.disabled = true;

@@ -1,6 +1,6 @@
 # Claude Haiku in the fleet: plan
 
-Status: written 2026-10-09. Stages A and B built (see the bottom of this file).
+Status: written 2026-10-09. Stages A to D built (see the bottom of this file).
 
 Goal: use Claude Haiku 5.5 to give model search new ideas to test, and to explain what
 it finds, without weakening the one promise this software makes: a model only reaches
@@ -92,16 +92,24 @@ the AI never sees a date or a price, and the backtester judges them on prices.
 
 ### Stage C: Haiku reviews models (needs the key)
 
-- On a model's page, "Ask for a review" sends its numbers to Haiku: training,
-  held-out, Final check and paper days, plus the luck figure. It writes a short plain
-  review: what looks like luck, what is fragile, what to watch on paper.
+- Haiku is sent what the model's page shows: training, held-out (each number beside
+  its coin-flip twin's), the luck figure, the Final check and paper days. It writes a
+  short plain review: a verdict word (promising, unclear, weak), what could be luck,
+  what is fragile, what to watch on paper.
+- Automatic: models that beat their coin flip, have a Final check or trade are
+  reviewed whenever their results change (a new backtest, a Final check, five more
+  paper days). On any tested model's page, "Ask Claude Haiku for a review" asks for
+  one too. At most 20 a day (config/ai.toml), asked-for ones first.
 - Advice to the owner only. Reviews are never shown to the idea writer (rule 4).
 
 ### Stage D, an experiment: a daily market note (needs the key)
 
-- Before each session, Haiku reads the day's headlines from Alpaca's news feed (the
-  existing Alpaca keys) and writes a short note: scheduled events (Fed decision, CPI,
-  jobs report), and whether the news looks unusually heavy.
+- Before each session (07:45 Chicago time to start), Haiku reads the headlines since
+  the last close from Alpaca's news feed (the existing Alpaca keys) and writes a short
+  note: scheduled events (Fed decision, CPI, jobs report), whether the news is quiet,
+  normal or heavy, and a flag for an unusual day.
+- Only notes written before the open count in the comparison; one written later (the
+  coordinator was down, say) is kept and marked so.
 - Tested only going forward (see "Why an AI cannot simply be backtested on the
   news"): after 40 or more paper days, compare each paper model's results on days the
   note flagged with the other days. Only if flagged days are clearly worse would a
@@ -134,5 +142,10 @@ The default cap is $5 a month, set in `config/ai.toml`.
 2. Stage B: the Haiku idea writer, with the cap and the spend count. Built: it runs on
    box1 once ANTHROPIC_API_KEY is in .env; tested with a stand-in for Anthropic, so the
    first real calls are worth watching on the Futures view.
-3. Stage C: reviews.
-4. Stage D: the market note, as an experiment.
+3. Stage C: reviews, automatic and on request. Built.
+4. Stage D: the market note, as an experiment. Built: the Futures view shows the
+   comparison and how many days it rests on.
+
+Stages B to D were tested with stand-ins for Anthropic and Alpaca's news, plus a demo
+run that reached the real Anthropic API with a made-up key (refused, recorded, shown,
+nothing spent).

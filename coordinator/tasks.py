@@ -134,16 +134,21 @@ def make_futures_tasks(venues: Any, rules: Any, limits: Limits) -> tuple[Callabl
     return (live_prices, trade, topstep_account)
 
 
-def make_ai_tasks(settings: Any, key: str) -> tuple[Callable[[ConnectionPool], None], ...]:
-    """Claude Haiku writing recipes for futures model search (coordinator.ai_ideas): at
-    most once a minute it checks whether a call is allowed (a key, a futures search
-    running, too few recipes waiting, under the hourly count and the monthly cap) and,
-    if so, makes one. Nothing without a key."""
-    from coordinator import ai_ideas
+def make_ai_tasks(settings: Any, key: str, rules: Any = None, news: Any = None) -> tuple[Callable[[ConnectionPool], None], ...]:
+    """Claude Haiku, all within the monthly cap in config/ai.toml, nothing without a key:
 
-    if not key or not settings.enabled:
+    - recipes (coordinator.ai_ideas): at most once a minute, while a futures search runs
+      and too few recipes wait, one call for new recipes
+    - reviews (coordinator.ai_reviews): once a minute, queue the reviews that are due and
+      write one (the owner's requests first)
+    - market note (coordinator.market_note): on a trading day from note_time Chicago
+      time, today's note (a failed news read is tried again ten minutes later)
+    """
+    from coordinator import ai_ideas, ai_reviews, market_note
+
+    if not key:
         return ()
-    last = {"t": -1e9}
+    last = {"t": -1e9, "reviews": -1e9, "note": -1e9}
 
     def recipes(pool: ConnectionPool) -> None:
         now_m = time.monotonic()
@@ -161,7 +166,48 @@ def make_ai_tasks(settings: Any, key: str) -> tuple[Callable[[ConnectionPool], N
         if result.get("written"):
             log.info("Claude Haiku wrote %d recipe(s) for $%.4f", result["written"], result.get("cost") or 0.0)
 
-    return (recipes,)
+    def reviews(pool: ConnectionPool) -> None:
+        now_m = time.monotonic()
+        if rules is None or now_m - last["reviews"] < 60:
+            return
+        last["reviews"] = now_m
+        with pool.connection() as conn:
+            try:
+                result = ai_reviews.tick(conn, settings, key, rules)
+                conn.commit()
+            except Exception as exc:  # noqa: BLE001 - reported, tried again next minute
+                conn.rollback()
+                log.warning("Claude Haiku reviews: %s", exc)
+                return
+        if result.get("reviewed") and not result.get("error"):
+            log.info("Claude Haiku reviewed %s", result["reviewed"])
+
+    def note(pool: ConnectionPool) -> None:
+        now_m = time.monotonic()
+        if news is None or now_m - last["note"] < 60:
+            return
+        last["note"] = now_m
+        with pool.connection() as conn:
+            try:
+                result = market_note.write_note(conn, settings, key, news)
+                conn.commit()
+            except Exception as exc:  # noqa: BLE001 - reported, tried again
+                conn.rollback()
+                log.warning("market note: %s", exc)
+                return
+        if result.get("error"):
+            last["note"] = now_m + 540  # wait ten minutes before the next try
+        elif result.get("written"):
+            log.info("Claude Haiku wrote the market note for %s", result["day"])
+
+    out = []
+    if settings.enabled:
+        out.append(recipes)
+    if settings.review_enabled:
+        out.append(reviews)
+    if settings.note_enabled:
+        out.append(note)
+    return tuple(out)
 
 
 MARKETS_FUTURES = ("MES", "MNQ")
