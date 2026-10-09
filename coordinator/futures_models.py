@@ -30,7 +30,7 @@ from psycopg.types.json import Jsonb
 
 from coordinator import futures_data, queue
 from coordinator.errors import BadRequest, Conflict, NotFound
-from fleet2.models.futures import REGISTRY, module_for, recipe
+from fleet2.models.futures import REGISTRY, RETIRED_FILES, module_for, recipe
 from fleet2.models.futures.base import check_module, params_with_defaults
 from fleet2.sim import topstep
 
@@ -56,8 +56,25 @@ def sync_starters(conn: psycopg.Connection) -> int:
             """,
             (name, module.NAME, name, module.DESCRIPTION, module.HOW_IT_WORKS, Jsonb(module.DEFAULT_PARAMS)),
         )
+    retire_old_files(conn)
     trim_recipes(conn)
     return len(REGISTRY)
+
+
+def retire_old_files(conn: psycopg.Connection) -> list[str]:
+    """Retire the models of files search no longer uses (RETIRED_FILES), except one that
+    is trading or has a Final check. Returns the retired ids."""
+    rows = conn.execute(
+        """
+        UPDATE models m SET status = 'retired'
+         WHERE m.market = 'futures' AND m.module = ANY(%s) AND m.status <> 'retired'
+           AND NOT EXISTS (SELECT 1 FROM futures_books b WHERE b.model_id = m.id AND b.status IN ('active', 'closing'))
+           AND NOT EXISTS (SELECT 1 FROM final_checks f WHERE f.model_id = m.id)
+        RETURNING m.id
+        """, (sorted(RETIRED_FILES),)).fetchall()
+    if rows:
+        log.info("retired %d model(s) of files search no longer uses", len(rows))
+    return [r["id"] for r in rows]
 
 
 def trim_recipes(conn: psycopg.Connection) -> list[str]:
@@ -109,6 +126,31 @@ def search_params(conn: psycopg.Connection, rules: topstep.Rules) -> dict[str, A
         raise Conflict("No futures prices yet: press Load futures prices first")
     return {"markets": ["futures"], "rules": rules.to_dict(), "periods": futures_data.futures_periods(conn),
             "candidates": 16}
+
+
+def shares(workers: int) -> list[dict[str, Any]]:
+    """What each of `workers` search jobs searches, so no two do the same thing: one
+    worker searches everything; with more, the first takes the recipes (new random ones,
+    Haiku's and the kept ones, about as much work as all the files) and the others split
+    the model files between them. More workers than files: files get a second worker
+    (each job has its own seed, so they still try different settings)."""
+    files = sorted(REGISTRY)
+    if workers <= 1:
+        return [{"files": files, "recipes": True}]
+    rest = workers - 1
+    out = [{"files": [], "recipes": True}]
+    for i in range(rest):
+        part = files[i::rest] if rest <= len(files) else [files[i % len(files)]]
+        out.append({"files": part, "recipes": False})
+    return out
+
+
+def share_text(share: dict[str, Any]) -> str:
+    """"recipes" or "Order block, Pullback" etc.: what one search job searches."""
+    names = [REGISTRY[n].NAME for n in share.get("files", REGISTRY) if n in REGISTRY]
+    if share.get("recipes", True):
+        names = ["recipes"] + names
+    return ", ".join(names)
 
 
 def kept_models(conn: psycopg.Connection) -> list[dict[str, Any]]:

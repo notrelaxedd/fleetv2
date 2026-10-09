@@ -227,15 +227,35 @@ def test_a_sweep_takes_yesterdays_low_and_closes_back_above_it():
     assert up.tolist() == [False] * 4 + [True, False] and not down.any()
 
 
-@pytest.mark.parametrize("setup", ["order_block", "choch", "sweep"])
-def test_every_smart_money_setup_trades_and_never_peeks(data, setup):
-    from fleet2.models.futures import smart_money
+def test_the_sequence_needs_a_sweep_then_a_turn_then_the_pullback(data):
+    """Every buy of the smart money sequence comes after a sweep of yesterday's low and,
+    after that, an upward change of character, both earlier on the same day."""
+    from fleet2.models.futures import features as f
 
-    params = {**params_with_defaults(smart_money, None), "setup": setup}
-    bars, full = answers(data, smart_money, params)
-    assert np.count_nonzero(full) > 0
-    rng = np.random.default_rng(len(setup))
-    for t in [*rng.integers(1, data.n_minutes, 5), int(data.day_end[rng.integers(0, data.n_days)]) - 1]:
-        cut_bars, cut = answers(data.until_minute(int(t)), smart_money, params)
-        closed = int(np.count_nonzero(cut_bars.complete))
-        assert np.array_equal(cut[:closed], full[:closed]), f"{setup}: an answer before minute {t} changed"
+    bars = wfd.resample(data, 5)
+    s = bars.series("MES")
+    up, down = R.smart_money_sequence(s, bars, 3, 24, 36)
+    assert up.any() and down.any()
+    sweep_up, _ = R.liquidity_sweeps(s, bars)
+    breaks_up, _, turned = R.structure_breaks(s, bars, 3)
+    k = np.arange(bars.n, dtype=float)
+    swept = f.latest_today(k, f.first_today(sweep_up, bars), bars)   # the day's first sweep of the low
+    turned_at = R._previous(f.latest_today(k, breaks_up & turned, bars), bars)
+    assert (turned_at[up] >= swept[up]).all()   # NaN (none earlier today) would fail too
+    plain_up, _ = R.order_block_retests(s, bars, 3, 24)
+    assert up.sum() < plain_up.sum() / 2        # far choosier than any order block pullback
+
+
+def test_the_retired_smart_money_file_still_runs_but_search_skips_it(conn):
+    from fleet2.models.futures import REGISTRY, RETIRED_FILES, get_module
+    from coordinator import futures_models
+
+    assert "smart_money" not in REGISTRY and get_module("smart_money") is RETIRED_FILES["smart_money"]
+    assert module_for("smart_money").NAME == "Smart money"
+    for mid in ("sm1", "sm2"):
+        conn.execute("INSERT INTO models (id, name, module, market, description, how_it_works, origin, status) "
+                     "VALUES (%s, 'Smart money', 'smart_money', 'futures', 'd', 'h', 'search', 'backtested')", (mid,))
+    conn.execute("INSERT INTO final_checks (model_id, feed, result) VALUES ('sm2', 'databento', '{}')")
+    futures_models.sync_starters(conn)
+    status = {r["id"]: r["status"] for r in conn.execute("SELECT id, status FROM models WHERE module = 'smart_money'")}
+    assert status == {"sm1": "retired", "sm2": "backtested"}  # a model with a Final check is never retired

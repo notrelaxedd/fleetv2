@@ -169,7 +169,7 @@ score is dropped when a better one is found).
 
 ## Futures models
 
-Seven model files under `fleet2/models/futures/`, each a well-known day-trading idea.
+Ten model files under `fleet2/models/futures/`, each a well-known day-trading idea.
 That is deliberate: they are honest starting points, and whether any still works after
 costs is exactly what the fleet finds out.
 
@@ -184,15 +184,23 @@ costs is exactly what the fleet finds out.
 - **Fair value gap**: after a fast three-bar move leaves a gap (the third bar's low above
   the first bar's high, or the mirror image), trades the first pullback into it in the
   direction of the move, ignoring tiny gaps and ones already gone through.
-- **Smart money**: "smart money concepts", rebuilt so that nothing is used before it is
-  known. A swing high (a bar above the bars on either side) only counts once the bars
-  after it have closed; a close above the latest swing high is a break of structure, and
-  a break against the day's last one a change of character. Its setting `setup` picks
-  one of three trades: a pullback into the order block (the last falling bar before an
-  upward break, or the mirror image), the change of character itself, or a sweep of
-  yesterday's high or low (the price pokes through it and closes back). The usual
-  smartmoneyconcepts Python package marks swings, gaps and order blocks using bars that
-  came after them, so a backtest of it looks better than anything that could trade.
+- **Smart money**, four files built from "smart money concepts", rebuilt so that nothing
+  is used before it is known. A swing high (a bar above the bars on either side) only
+  counts once the bars after it have closed; a close above the latest swing high is a
+  break of structure, and a break against the day's last one a change of character.
+  - **Order block**: after a break, trades the pullback into the last opposite bar
+    before it (the order block).
+  - **Change of character**: trades the turn itself.
+  - **Liquidity sweep**: the price pokes through yesterday's high or low and closes back
+    inside; it trades the turn back.
+  - **Smart money sequence**: all three in order: a sweep of yesterday's low, then an
+    upward change of character, then the pullback into its order block (or the mirror
+    image). Few trades, each with more reasons behind it.
+
+  The usual smartmoneyconcepts Python package marks swings, gaps and order blocks using
+  bars that came after them, so a backtest of it looks better than anything that could
+  trade. (An earlier single "Smart money" file with a setup setting was split into these;
+  its models are retired unless trading or Final-checked.)
 
 Each can go long or short, decides on 1-, 3-, 5- or 15-minute bars, and has an optional
 stop and target in ticks; model search tries all of these. Every one passes the
@@ -200,7 +208,7 @@ cut-off test (`tests/test_futures_cutoff.py`).
 
 ### Recipes: new ideas from building blocks
 
-Model search can only tune the settings of an idea, so besides the seven files it also
+Model search can only tune the settings of an idea, so besides the ten files it also
 tries **recipes** (`fleet2/models/futures/recipe.py`): models put together from building
 blocks, never from new code. A recipe picks:
 
@@ -286,7 +294,7 @@ top it says where the futures prices come from ("proxy" when they are the SPY/QQ
 stand-in, "synthetic" in demo mode), with two buttons:
 
 - **Load futures prices** starts a Futures prices job (see "Futures prices").
-- **Start model search** searches the seven futures model files and new recipes. It stays greyed out,
+- **Start model search** searches the ten futures model files and new recipes. It stays greyed out,
   with "Set the fee in config/topstep.toml" under it, until the commissions are filled
   in there. One search runs at a time, stocks and crypto or futures.
 
@@ -311,6 +319,12 @@ How futures model search works:
 - **Chance this is luck**: every setting tried is counted. The more tries, the more one
   of them looks good by luck alone; this figure (the deflated Sharpe ratio) says how
   likely that is for each model. Lower is better.
+- **Each worker searches different strategies.** Start model search gives every idle
+  worker its own share: with one worker it searches everything; with more, one worker
+  takes the recipes and the others split the model files between them (with more
+  workers than files, a file gets a second worker with its own seed). The Futures view
+  lists who searches what. A worker that is offline when the search starts gets no
+  share, so start the search once all workers are up.
 - Settings are tried on every core of the worker at once, and the prices are downloaded
   once and kept until they change. Stop model search stops it within a second.
 

@@ -1,4 +1,8 @@
-"""Smart money: trade order block retests, changes of character or sweeps of yesterday's high or low."""
+"""Smart money: trade order block retests, changes of character or sweeps of yesterday's high or low.
+
+Retired: split into order_block.py, change_of_character.py and liquidity_sweep.py, so each
+setup has its own place in the kept list. Kept only so models already made from this file
+can still run (RETIRED_FILES in __init__.py)."""
 from __future__ import annotations
 
 from typing import Any

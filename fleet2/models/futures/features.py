@@ -128,3 +128,11 @@ def day_open(series, bars: Bars) -> np.ndarray:
 def minutes_left(bars: Bars) -> np.ndarray:
     """Minutes from the end of each bar to the close of its session."""
     return bars.session - (bars.minute + bars.size)
+
+
+def latest_signal(up: np.ndarray, down: np.ndarray, bars: Bars, params: dict) -> np.ndarray:
+    """+1 from an "up" bar, -1 from a "down" bar, until a signal the other way or the
+    close; only signals from start_minute to before last_entry_minute count."""
+    window = (bars.minute >= int(params["start_minute"])) & (bars.minute < int(params["last_entry_minute"]))
+    up, down = up & window, down & window
+    return latest_today(np.where(up, 1.0, -1.0), up | down, bars, before=0.0)

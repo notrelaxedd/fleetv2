@@ -12,7 +12,8 @@ from __future__ import annotations
 from types import ModuleType
 from typing import Any
 
-from fleet2.models.futures import (fair_value_gap, gap_fade, opening_range, pullback, recipe, smart_money, trend_day,
+from fleet2.models.futures import (change_of_character, fair_value_gap, gap_fade, liquidity_sweep, opening_range,
+                                   order_block, pullback, recipe, smart_money, smart_money_sequence, trend_day,
                                    vwap_revert)
 
 REGISTRY: dict[str, ModuleType] = {
@@ -22,13 +23,22 @@ REGISTRY: dict[str, ModuleType] = {
     "gap_fade": gap_fade,
     "pullback": pullback,
     "fair_value_gap": fair_value_gap,
-    "smart_money": smart_money,
+    "order_block": order_block,
+    "change_of_character": change_of_character,
+    "liquidity_sweep": liquidity_sweep,
+    "smart_money_sequence": smart_money_sequence,
+}
+
+# Files model search no longer uses, kept so the models already made from them can still
+# be backtested and traded (sync_starters retires those that are not trading).
+RETIRED_FILES: dict[str, ModuleType] = {
+    "smart_money": smart_money,   # split into order_block, change_of_character and liquidity_sweep
 }
 
 
 def get_module(name: str) -> ModuleType:
     try:
-        return REGISTRY[name]
+        return REGISTRY[name] if name in REGISTRY else RETIRED_FILES[name]
     except KeyError:
         raise KeyError(f"unknown futures model file {name!r} (known: {', '.join(sorted(REGISTRY))})") from None
 

@@ -148,7 +148,8 @@ def test_ranked_by_held_out_net_and_only_when_beating_the_twin(client, conn, fee
     store(conn, "vwap_revert", shaped(0.50, 0.30, 100.0, twin_paid=1_000.0))  # its coin flip makes more money
     html = client.get("/models?market=futures").text
     ranks = dict(re.findall(r'data-model="([^"]+)" data-rank="(\d*)"', html))
-    assert ranks == {"pullback": "1", "gap_fade": "2", "trend_day": "", "vwap_revert": "", "opening_range": "", "fair_value_gap": "", "smart_money": ""}
+    assert ranks == {"pullback": "1", "gap_fade": "2", "trend_day": "", "vwap_revert": "", "opening_range": "", "fair_value_gap": "",
+                     "order_block": "", "change_of_character": "", "liquidity_sweep": "", "smart_money_sequence": ""}
     assert futures_ids(html)[:2] == ["pullback", "gap_fade"]
     rows = html.split("<li>")
     pull = next(r for r in rows if 'data-model="pullback"' in r)
@@ -452,3 +453,35 @@ def test_profit_per_day_follows_the_rules(conn):
     pick = futures_view.chosen(m["metrics"]["held_out"], FEES)
     daily = futures_view.per_day(m, replace(FEES, profit_target=6000.0, combine_max_days=40), pick)
     assert daily == {"value": 6.0, "twin": 0.0, "needed": 150.0, "days": 100, "contracts": 1}
+
+
+def test_each_worker_searches_different_strategies():
+    assert futures_models.shares(1) == [{"files": sorted(REGISTRY), "recipes": True}]
+    for workers in (2, 3, 4, 12, 30):
+        parts = futures_models.shares(workers)
+        assert len(parts) == workers and [p["recipes"] for p in parts].count(True) == 1
+        files = [f for p in parts for f in p["files"]]
+        assert set(files) == set(REGISTRY)                               # every strategy is searched
+        if workers - 1 <= len(REGISTRY):
+            assert len(files) == len(set(files))                         # and by one worker only
+        assert all(p["files"] or p["recipes"] for p in parts)
+    assert futures_models.share_text({"files": [], "recipes": True}) == "recipes"
+    assert futures_models.share_text({"files": ["pullback", "gap_fade"], "recipes": False}) == "Pullback, Gap fade"
+
+
+def test_a_futures_search_on_three_workers_splits_the_strategies(client, conn, monkeypatch):
+    monkeypatch.setattr(futures_data, "MIN_DAYS_TO_FIX_PERIODS", 20)
+    for name in ("w1", "w2", "w3"):
+        heartbeat(client, enroll(client, conn, name))
+    client.app.state.topstep = FEES
+    load(conn)
+    r = client.post("/api/search/start", json={"markets": ["futures"]})
+    assert r.status_code == 201
+    assert r.json()["message"] == "Futures model search started on 3 workers, each on different strategies"
+    jobs = conn.execute("SELECT params FROM jobs WHERE kind = 'model_search'").fetchall()
+    shares = sorted((j["params"]["recipes"], tuple(j["params"]["files"])) for j in jobs)
+    assert shares[-1] == (True, ()) and not shares[0][0] and not shares[1][0]
+    assert set(shares[0][1]) | set(shares[1][1]) == set(REGISTRY)
+    html = client.get("/models?market=futures").text
+    lines = re.findall(r"<li>(w\d: [^<]+)</li>", html)
+    assert len(lines) == 3 and any(line.endswith(": recipes") for line in lines)
