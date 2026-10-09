@@ -78,10 +78,12 @@ def nice_ticks(lo: float, hi: float, count: int = Y_TICKS) -> tuple[list[float],
 
 
 def money(value: float, step: float = 1.0) -> str:
-    """$100, $1,250, $102.5"""
+    """$100, $1,250, $102.5, −$500"""
+    sign = "−" if value < 0 else ""
+    value = abs(value)
     if float(step).is_integer():
-        return f"${value:,.0f}"
-    return f"${value:,.1f}" if step >= 0.1 else f"${value:,.2f}"
+        return f"{sign}${value:,.0f}"
+    return f"{sign}${value:,.1f}" if step >= 0.1 else f"{sign}${value:,.2f}"
 
 
 def date_label(epoch: float, long_span: bool = True) -> str:
@@ -104,10 +106,11 @@ def _path(pts: list[tuple[float, float]]) -> str:
 
 def growth_chart(t: Sequence[float], model: Sequence[float | None], benchmark: Sequence[float | None] | None = None,
                  model_label: str = "Model", benchmark_label: str = "Buy and hold",
-                 title: str = "Growth of $100", width: int = WIDTH, height: int = HEIGHT) -> str:
+                 title: str = "Growth of $100", width: int = WIDTH, height: int = HEIGHT, ref: float = 100.0) -> str:
     """The Growth of $100 line chart: the model as a solid accent line, buy and hold as a dashed
     muted line, a thin reference line at $100, a few $ values down the side and dates along the
-    bottom. Missing (None) points are skipped; with nothing to draw it returns a friendly empty SVG."""
+    bottom. Missing (None) points are skipped; with nothing to draw it returns a friendly empty SVG.
+    `ref` moves the reference line (0 for a chart of dollars won or lost, the futures view)."""
     benchmark = list(benchmark or [])
     model = list(model or [])
     t = list(t or [])
@@ -121,13 +124,13 @@ def growth_chart(t: Sequence[float], model: Sequence[float | None], benchmark: S
     t0, t1 = float(t[min(used)]), float(t[max(used)])
     if t1 <= t0:
         return empty_chart(width=width, height=height)
-    values = [v for _, v in model_pts] + [v for _, v in bench_pts] + [100.0]
+    values = [v for _, v in model_pts] + [v for _, v in bench_pts] + [ref]
     lo, hi = min(values), max(values)
     pad = (hi - lo) * 0.06 or 5.0
     lo, hi = lo - pad, hi + pad
     ticks, step = nice_ticks(lo, hi)
-    if 100.0 not in ticks:
-        ticks = sorted(t_ for t_ in ticks if abs(t_ - 100.0) > step * 0.45) + [100.0]
+    if ref not in ticks:
+        ticks = sorted(t_ for t_ in ticks if abs(t_ - ref) > step * 0.45) + [ref]
         ticks.sort()
 
     plot_w, plot_h = width - LEFT - RIGHT, height - TOP - BOTTOM
@@ -143,12 +146,12 @@ def growth_chart(t: Sequence[float], model: Sequence[float | None], benchmark: S
              f'<title id="chart-title">{escape(title)}</title>',
              f'<desc id="chart-desc">{escape(model_label)} (solid line)'
              + (f' against {escape(benchmark_label)} (dashed line)' if bench_pts else "")
-             + f', starting from $100, {date_label(t0, False)} to {date_label(t1, False)}.</desc>']
+             + f', starting from {money(ref)}, {date_label(t0, False)} to {date_label(t1, False)}.</desc>']
 
     parts.append('<g class="grid" data-axis="y">')
     for v in ticks:
         y = y_of(v)
-        if v != 100.0:
+        if v != ref:
             parts.append(f'<line class="gridline" x1="{LEFT}" x2="{width - RIGHT}" y1="{_num(y)}" y2="{_num(y)}" '
                          f'stroke="{GRID}" stroke-width="1" vector-effect="non-scaling-stroke"/>')
         parts.append(f'<text class="ylabel" data-tick="{v:g}" x="{LEFT - 8}" y="{_num(y)}" text-anchor="end" '
@@ -165,8 +168,8 @@ def growth_chart(t: Sequence[float], model: Sequence[float | None], benchmark: S
                      f'font-size="12">{date_label(t0 + (t1 - t0) * frac, long_span)}</text>')
     parts.append("</g>")
 
-    y100 = y_of(100.0)
-    parts.append(f'<line class="ref" data-ref="100" x1="{LEFT}" x2="{width - RIGHT}" y1="{_num(y100)}" y2="{_num(y100)}" '
+    y100 = y_of(ref)
+    parts.append(f'<line class="ref" data-ref="{ref:g}" x1="{LEFT}" x2="{width - RIGHT}" y1="{_num(y100)}" y2="{_num(y100)}" '
                  f'stroke="{MUTED}" stroke-opacity=".55" stroke-width="1" vector-effect="non-scaling-stroke"/>')
 
     if bench_pts:
@@ -187,4 +190,4 @@ def chart_for(chart: dict[str, Any] | None) -> str:
     chart = chart or {}
     return growth_chart(chart.get("t") or [], chart.get("model") or [], chart.get("benchmark") or [],
                         chart.get("model_label") or "Model", chart.get("benchmark_label") or "Buy and hold",
-                        chart.get("title") or "Growth of $100")
+                        chart.get("title") or "Growth of $100", ref=float(chart.get("ref", 100.0)))

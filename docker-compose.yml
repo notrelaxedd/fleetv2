@@ -29,7 +29,7 @@ services:
       DATABASE_URL: postgresql://fleet2:${POSTGRES_PASSWORD:-fleet2}@db:5432/fleet2
       FLEET_BIND: 0.0.0.0:8090
     volumes:
-      # Edit config/limits.toml on box1 and `docker compose restart coordinator`.
+      # Edit config/limits.toml or config/topstep.toml on box1 and `docker compose restart coordinator`.
       - ./config:/app/config:ro
     depends_on:
       db:

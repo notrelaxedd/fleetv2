@@ -5,6 +5,8 @@
   workers                list workers
   send-test-job [--seconds N] [--target auto|all_idle|<worker name>]
                          a sleep job, to watch progress on the Fleet screen
+  futures-prices         a Futures prices job: download MES and MNQ 1-minute prices
+                         (the Models screen's Futures view has the same button)
 """
 from __future__ import annotations
 
@@ -25,6 +27,7 @@ def main(argv: list[str] | None = None) -> int:
     test = sub.add_parser("send-test-job")
     test.add_argument("--seconds", type=int, default=60)
     test.add_argument("--target", default="auto")
+    sub.add_parser("futures-prices")
     args = parser.parse_args(argv)
     config = Config.from_env()
     if args.command == "migrate":
@@ -50,6 +53,10 @@ def main(argv: list[str] | None = None) -> int:
             result = queue.create_job(conn, "sleep", {"seconds": args.seconds}, target)
             for job in result.jobs:
                 print(f"job {job['id']} -> {job['target_worker_id'] or 'waiting for a free worker'}")
+        elif args.command == "futures-prices":
+            result = queue.create_job(conn, "data_refresh", {"markets": ["futures"]}, queue.AUTO)
+            job = result.jobs[0]
+            print(f"futures prices job {job['id']} -> {job['target_worker_id'] or 'waiting for a free worker'}")
     return 0
 
 

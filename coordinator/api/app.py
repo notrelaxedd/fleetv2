@@ -12,13 +12,17 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from coordinator import db, web
-from coordinator.api import dashboard, data, dl, jobs, models, owner, trading, workers
+from coordinator.api import dashboard, data, dl, futures, jobs, models, owner, trading, workers
 from coordinator.broker import BrokerStatus, make_broker
 from coordinator.bundle import build_bundle
 from coordinator.config import Config
 from coordinator.data import make_bar_source
+from coordinator.futures_data import FakeFuturesSource, ProxySource, make_futures_source
+from coordinator.futures_trading import Venues
+from coordinator.topstep_broker import make_topstep
 from coordinator.errors import QueueError
 from coordinator.limits import load_limits
+from fleet2.sim.topstep import load_rules
 from coordinator import models as starter_models
 
 log = logging.getLogger(__name__)
@@ -141,10 +145,13 @@ def create_app(config: Config, broker_status: BrokerStatus | None = None) -> Fas
     app = FastAPI(title="fleet-v2 coordinator", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.config = config
     app.state.limits = load_limits(config.limits_path)
+    app.state.topstep = load_rules(config.topstep_path)
     if broker_status is None:
         broker_status = BrokerStatus(make_broker(config, _live_confirmed(config)))
     app.state.broker_status = broker_status
     app.state.bar_source = make_bar_source(config)
+    app.state.futures_source = make_futures_source(config)
+    app.state.venues = make_venues(config, broker_status)
     app.state.bundle = build_bundle()
     log.info("worker bundle code_version=%s", app.state.bundle.code_version)
 
@@ -170,8 +177,11 @@ def create_app(config: Config, broker_status: BrokerStatus | None = None) -> Fas
     app.include_router(models.worker_router)
     app.include_router(models.owner_router)
     app.include_router(models.search_router)
+    app.include_router(models.worker_search_router)
     app.include_router(trading.worker_router)
     app.include_router(trading.owner_router)
+    app.include_router(futures.worker_router)
+    app.include_router(futures.owner_router)
     app.include_router(owner.health_router)
     app.include_router(dl.router)
     app.include_router(dashboard.router)
@@ -180,6 +190,27 @@ def create_app(config: Config, broker_status: BrokerStatus | None = None) -> Fas
     app.add_middleware(BodySizeLimit)
     app.add_middleware(DashboardHeaders)
     return app
+
+
+def make_venues(config: Config, broker_status: BrokerStatus) -> Venues:
+    """Where futures models trade: the Alpaca paper account (SPY/QQQ share equivalents)
+    and, once confirmed, TopstepX; with the live price source of each."""
+    link = make_topstep(config, _setting(config, "topstep_confirmed"))
+    sources: dict[str, Any] = {"alpaca": ProxySource(config)}
+    if link.client is not None and not getattr(link.client, "fake", False):
+        sources["topstepx"] = link.client
+    if config.fake_broker:
+        sources["synthetic"] = FakeFuturesSource(seed=7)
+    return Venues(broker_status, link, sources, fake=config.fake_broker)
+
+
+def _setting(config: Config, key: str) -> Any:
+    try:
+        with db.connect(config.database_url) as conn:
+            row = conn.execute("SELECT value FROM settings WHERE key = %s", (key,)).fetchone()
+    except Exception:  # noqa: BLE001 - no database yet means not confirmed
+        return None
+    return row["value"] if row else None
 
 
 def _live_confirmed(config: Config) -> Any:

@@ -17,7 +17,8 @@ RUN pip install --no-cache-dir ".[coordinator]"
 
 ENV FLEET_BIND=0.0.0.0:8090 \
     FLEET_DEPLOY_DIR=/app/deploy \
-    FLEET_LIMITS_FILE=/app/config/limits.toml
+    FLEET_LIMITS_FILE=/app/config/limits.toml \
+    FLEET_TOPSTEP_FILE=/app/config/topstep.toml
 
 EXPOSE 8090
 

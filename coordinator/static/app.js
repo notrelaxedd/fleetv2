@@ -64,7 +64,10 @@
     var screen = $("[data-models-screen]");
     if (!screen) { return "/fragments/fleet"; }
     var id = screen.getAttribute("data-selected-id");
-    return "/fragments/models" + (id ? "?id=" + encodeURIComponent(id) : "");
+    var query = [];
+    if (screen.getAttribute("data-market")) { query.push("market=" + encodeURIComponent(screen.getAttribute("data-market"))); }
+    if (id) { query.push("id=" + encodeURIComponent(id)); }
+    return "/fragments/models" + (query.length ? "?" + query.join("&") : "");
   }
 
   function refresh() {
@@ -132,6 +135,19 @@
     var url, body, which = "model", done = "Done";
     if (action === "search-start" || action === "search-stop") {
       url = "/api/search/" + (action === "search-start" ? "start" : "stop");
+      if (action === "search-start" && button.dataset.market) { body = { markets: [button.dataset.market] }; }
+      which = "search";
+    } else if (action === "futures-prices") {
+      url = "/api/jobs";
+      body = { kind: "futures_prices", target: "auto" };
+      which = "search";
+    } else if (action === "final-check") {
+      url = "/api/models/" + encodeURIComponent(id) + "/final-check";
+    } else if (action === "futures-start" || action === "futures-stop") {
+      url = "/api/models/" + encodeURIComponent(id) + "/futures/" + (action === "futures-start" ? "start" : "stop");
+      body = { venue: button.dataset.venue };
+    } else if (action === "topstep-resume") {
+      url = "/api/topstep/resume";
       which = "search";
     } else if (action === "run-backtest") {
       url = "/api/jobs";
@@ -160,7 +176,7 @@
         if (!r.ok) { toast(r.message, false); }
         return refresh();
       });
-    } else if (/^(search-(start|stop)|run-backtest|paper-(start|stop))$/.test(action)) {
+    } else if (/^(search-(start|stop)|run-backtest|paper-(start|stop)|futures-prices|final-check|futures-(start|stop)|topstep-resume)$/.test(action)) {
       modelsAction(button, action);
     } else if (action === "run-again") {
       button.disabled = true;
@@ -241,6 +257,16 @@
     if (action === "open-live") { liveOpen(); }
     else if (action === "live-close") { liveClose(); }
     else if (action === "live-withdraw") { liveSend(button, "/api/live/withdraw"); }
+  });
+
+  document.addEventListener("submit", function (e) {
+    if (!e.target.matches("[data-topstep-form]")) { return; }
+    e.preventDefault();
+    var input = $("[data-topstep-phrase]", e.target);
+    send("/api/topstep/confirm", { confirm: input.value.trim() }).then(function (r) {
+      reply("search", plainMessage(r, "Done"), r.ok);
+      if (r.ok) { input.value = ""; }
+    });
   });
 
   document.addEventListener("submit", function (e) {

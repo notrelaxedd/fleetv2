@@ -34,10 +34,15 @@ def running_jobs(conn: psycopg.Connection) -> list[dict[str, Any]]:
                         (list(SEARCH_STATUSES),)).fetchall()
 
 
-def start(conn: psycopg.Connection, limits: Limits, markets: list[str] | None = None, target: str = "all_idle") -> dict[str, Any]:
+def start(conn: psycopg.Connection, limits: Limits, markets: list[str] | None = None, target: str = "all_idle",
+          rules: Any = None) -> dict[str, Any]:
     if running_jobs(conn):
         raise Conflict("Model search is already running")
     markets = markets or ["stocks", "crypto"]
+    if markets == ["futures"]:
+        from coordinator import futures_models
+
+        return _start(conn, futures_models.search_params(conn, rules), target, "Futures model search")
     params = {
         "markets": markets,
         "held_out_start_t": {m: held_out_start(conn, m) for m in markets},
@@ -46,6 +51,11 @@ def start(conn: psycopg.Connection, limits: Limits, markets: list[str] | None = 
                    "max_per_model": limits.max_per_model},
         "held_out_fraction": HELD_OUT_FRACTION,
     }
+    return _start(conn, params, target, "Model search")
+
+
+def _start(conn: psycopg.Connection, params: dict[str, Any], target: str, label: str) -> dict[str, Any]:
+    """One search job per idle worker (each with its own seed), or one job that waits."""
     if target == "all_idle" and not queue.idle_workers(conn):
         target = "auto"
     if target == "all_idle":
@@ -53,10 +63,10 @@ def start(conn: psycopg.Connection, limits: Limits, markets: list[str] | None = 
         jobs = []
         for w in workers:
             jobs += queue.create_job(conn, "model_search", {**params, "seed": secrets.randbelow(10**9)}, w["id"]).jobs
-        return {"jobs": jobs, "message": f"Model search started on {len(jobs)} worker{'s' if len(jobs) != 1 else ''}"}
+        return {"jobs": jobs, "message": f"{label} started on {len(jobs)} worker{'s' if len(jobs) != 1 else ''}"}
     result = queue.create_job(conn, "model_search", {**params, "seed": secrets.randbelow(10**9)}, target)
     where = "waits for a free worker" if result.waiting else "started"
-    return {"jobs": result.jobs, "message": f"Model search {where}"}
+    return {"jobs": result.jobs, "message": f"{label} {where}"}
 
 
 def stop(conn: psycopg.Connection) -> dict[str, Any]:

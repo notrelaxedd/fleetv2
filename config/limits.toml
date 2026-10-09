@@ -19,3 +19,11 @@ daily_loss_limit_pct = 2.0
 [fleet]
 # A worker card turns amber at this CPU temperature (degrees C).
 hot_temp_c = 80
+
+[futures]
+# Futures models paper trading on Alpaca: each micro contract is traded as its share
+# equivalent (1 MES = 50 SPY shares, about $33,000; 1 MNQ = 82 QQQ shares).
+# Most micro contracts one model may hold.
+futures_paper_max_contracts = 2
+# Most dollars all futures paper models together may hold in SPY and QQQ (long or short).
+futures_paper_max_dollars = 150000
