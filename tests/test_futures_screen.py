@@ -151,7 +151,7 @@ def test_ranked_by_held_out_net_and_only_when_beating_the_twin(client, conn, fee
     assert futures_ids(html)[:2] == ["pullback", "gap_fade"]
     rows = html.split("<li>")
     pull = next(r for r in rows if 'data-model="pullback"' in r)
-    assert element(pull, "data-money") == "+$1,705" and element(pull, "data-pass-line") == "Passes 45% · coin flip 30%"
+    assert element(pull, "data-money") == "+$1,705" and element(pull, "data-pass-line") == "Passes 45% · coin flip 30% · −$0.59 a day of $50.00 needed"
     trend = next(r for r in rows if 'data-model="trend_day"' in r)
     assert element(trend, 'data-tag="twin"') == "No better than a coin flip"
     detail = client.get("/models?market=futures&id=pullback").text
@@ -375,3 +375,36 @@ def test_the_final_check_runs_once_and_is_kept_forever(client, conn, monkeypatch
     assert element(html, 'data-final-check="stored"').startswith("Final check, kept forever: the lockbox passes")
     assert 'data-action="final-check"' not in html
     assert "Lockbox Final check" in html and "Lockbox passes" in html
+
+
+# ------------------------------------------------------------------ profit per day
+
+
+def with_daily(total: float, twin_total: float, days: int = 470) -> dict:
+    m = shaped(0.0, 0.0, 0.0, months=3.0)
+    m["held_out"]["numbers"]["days"] = days
+    m["held_out"]["sizes"][0].update(net_pnl=total, twin_pnl=twin_total)
+    return m
+
+
+@pytest.mark.parametrize("total, value, tone", [
+    (203.0, "$0.43", "warn"),        # Gap fade #1 on box1: $203 over 470 days, far from $50 a day
+    (-575.0, "−$1.22", "loss"),
+    (470 * 60.0, "$60.00", "gain"),  # enough to reach $3,000 in 60 days on average
+])
+def test_profit_per_day_says_how_far_a_model_is_from_a_combine(client, conn, fees, total, value, tone):
+    store(conn, "gap_fade", with_daily(total, -40.0))
+    html = client.get("/models?market=futures&id=gap_fade").text
+    card = element(html, 'data-metric="per_day"')
+    assert card.startswith(f"Profit per day {value}")
+    assert "needs about $50.00 a day" in card and "coin-flip twin: −$0.09" in card
+    assert f'data-tone="{tone}"' in attr_tags(html, 'data-metric="per_day"')[0]
+    row = element(html, 'data-model="gap_fade"')
+    assert f"{value} a day of $50.00 needed" in row
+
+
+def test_profit_per_day_follows_the_rules(conn):
+    m = {"id": "gap_fade", "module": "gap_fade", "metrics": with_daily(600.0, 0.0, days=100)}
+    pick = futures_view.chosen(m["metrics"]["held_out"], FEES)
+    daily = futures_view.per_day(m, replace(FEES, profit_target=6000.0, combine_max_days=40), pick)
+    assert daily == {"value": 6.0, "twin": 0.0, "needed": 150.0, "days": 100, "contracts": 1}

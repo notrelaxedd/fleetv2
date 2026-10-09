@@ -109,6 +109,7 @@ def list_row(m: dict[str, Any], rules: topstep.Rules) -> dict[str, Any]:
     held = metrics.get("held_out") or {}
     pick = st["pick"] or {}
     sim, twin = pick.get("sim") or {}, pick.get("twin") or {}
+    daily = per_day(m, rules, pick) if st["tested"] else None
     curve = ((held.get("numbers") or {}).get("curve") or {}).get("pnl") or []
     step = max(1, len(curve) // SPARK_POINTS)
     retired = m["status"] == "retired"
@@ -126,6 +127,8 @@ def list_row(m: dict[str, Any], rules: topstep.Rules) -> dict[str, Any]:
         "status": STATUS_TEXT[m["status"]], "status_key": m["status"] or "new", "origin": m["origin"],
         "money": money, "money_value": st["net"], "tone": tone, "money_note": note,
         "pass_line": (f"Passes {share(sim.get('pass_rate'))} · coin flip {share(twin.get('pass_rate'))}"
+                      + (f" · {per_day_text(daily['value'])} a day of {per_day_text(daily['needed'])} needed"
+                         if daily and daily["value"] is not None else "")
                       if st["tested"] else "Not tested yet"),
         "beats": st["beats"], "rankable": rankable, "retired": retired, "stale": st["stale"], "tested": st["tested"],
         "feed_tag": FEED_TAG.get(feed) if feed else None, "proxy": feed in ("proxy", "synthetic"),
@@ -160,6 +163,28 @@ def ranked(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def per_day(m: dict[str, Any], rules: topstep.Rules, pick: dict[str, Any]) -> dict[str, Any]:
+    """Held-out profit per trading day at the chosen size (and the coin-flip twin's),
+    beside what a Combine needs: the profit target spread over the days an attempt has
+    (combine_max_days), e.g. $3,000 / 60 = $50 a day."""
+    held = (m.get("metrics") or {}).get("held_out") or {}
+    days = int((held.get("numbers") or {}).get("days") or 0)
+    needed = rules.profit_target / max(rules.combine_max_days, 1)
+
+    def daily(total: Any) -> float | None:
+        return None if total is None or days == 0 else float(total) / days
+
+    return {"value": daily(pick.get("net_pnl")), "twin": daily(pick.get("twin_pnl")), "needed": needed,
+            "days": days, "contracts": int(pick.get("contracts") or 1)}
+
+
+def per_day_text(value: float | None) -> str:
+    if value is None:
+        return "-"
+    sign = "−" if value < 0 else ""
+    return f"{sign}${abs(value):,.2f}"
+
+
 def _card(key: str, label: str, value: str, description: str, note: str | None = None, tone: str = "plain") -> dict[str, Any]:
     return {"key": key, "label": label, "value": value, "description": description, "note": note, "tone": tone}
 
@@ -175,6 +200,7 @@ def cards(m: dict[str, Any], rules: topstep.Rules, pick: dict[str, Any], tries: 
     twin_payout = None if twin.get("mean_paid") is None else split * twin["mean_paid"]
     beat = (sim.get("pass_rate") or 0) > (twin.get("pass_rate") or 0)
     lk = luck(m, tries)
+    daily = per_day(m, rules, pick)
     out = [
         _card("pass_rate", "Pass rate", share(sim.get("pass_rate")),
               "Share of Combine attempts on the held-out prices that reached the profit target without touching "
@@ -202,6 +228,14 @@ def cards(m: dict[str, Any], rules: topstep.Rules, pick: dict[str, Any], tries: 
                else f"Tried 1 to {held.get('max_size', 1)}") if pick.get("net") is not None
               else f"{note}: until then the numbers are for 1",
               "warn" if held.get("too_risky") or pick.get("net") is None else "plain"),
+        _card("per_day", "Profit per day", per_day_text(daily["value"]),
+              f"Held-out profit and loss per trading day at {daily['contracts']} "
+              f"micro{'s' if daily['contracts'] != 1 else ''}, averaged over {daily['days']:,} days. To reach the "
+              f"{dollars(rules.profit_target, signed=False)} profit target within the {rules.combine_max_days} "
+              f"trading days an attempt is given, a model needs about {per_day_text(daily['needed'])} a day.",
+              f"Needs about {per_day_text(daily['needed'])} a day · coin-flip twin: {per_day_text(daily['twin'])}",
+              "plain" if daily["value"] is None else "gain" if daily["value"] >= daily["needed"]
+              else "warn" if daily["value"] > 0 else "loss"),
         _card("worst_day", "Worst day", dollars(numbers.get("worst_day")),
               "The biggest loss of one held-out day at one contract. The note gives the worst moment of any day, "
               "open trades included: that is what the loss limit watches.",
