@@ -108,8 +108,10 @@ class DatabentoError(RuntimeError):
 
 
 class _PastAvailableEnd(DatabentoError):
-    """Databento's 422 "data_end_after_available_end": its history runs a few minutes
-    behind the market, and the answer names the last moment it has."""
+    """A 422 from Databento naming the latest end it will serve: "data_end_after_available_end"
+    (its history runs a few minutes behind the market) or "dataset_unavailable_range" (the
+    last day or so of CME prices needs a live-data license, which usage-based accounts
+    do not have)."""
 
     def __init__(self, end: datetime) -> None:
         super().__init__(f"Databento has data up to {_iso(end)}")
@@ -120,19 +122,34 @@ class _Busy(DatabentoError):
     """A busy Databento (a 5xx answer) or a lost connection: worth another try."""
 
 
-_AVAILABLE_UP_TO = re.compile(r"available up to '([^']+)'")
+_TIME = r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)"
+_AVAILABLE_UP_TO = re.compile(r"available up to '?" + _TIME)
+_END_BEFORE = re.compile(r"end time before '?" + _TIME)
+_LATEST_END_CASES = ("data_end_after_available_end", "dataset_unavailable_range")
 
 
-def _available_end(detail: str) -> datetime | None:
-    """The time in "... has data available up to '2026-10-09 02:00:00+00:00' ...", or None."""
-    match = _AVAILABLE_UP_TO.search(detail)
-    if not match:
-        return None
-    text = re.sub(r"(\.\d{6})\d+", r"\1", match.group(1).strip().replace("Z", "+00:00"))
+def _read_time(text: str) -> datetime | None:
+    text = re.sub(r"(\.\d{6})\d+", r"\1", text.strip().replace("Z", "+00:00"))
     try:
         return _utc(datetime.fromisoformat(text))
     except ValueError:
         return None
+
+
+def _available_end(detail: str) -> datetime | None:
+    """The latest end Databento will serve, from its 422 message, or None:
+    "... has data available up to '2026-10-09 02:00:00+00:00' ..." (that very time), or
+    "... Try again with an end time before 2026-10-08T18:37:54.511021000Z." (the whole
+    minute before it, so the end is strictly earlier)."""
+    match = _AVAILABLE_UP_TO.search(detail)
+    if match:
+        return _read_time(match.group(1))
+    match = _END_BEFORE.search(detail)
+    if match:
+        before = _read_time(match.group(1))
+        if before is not None:
+            return (before - timedelta(microseconds=1)).replace(second=0, microsecond=0)
+    return None
 
 
 class DatabentoSource:
@@ -182,7 +199,8 @@ class DatabentoSource:
             detail = exc.read().decode("utf-8", "replace")
             if exc.code in (401, 403):
                 raise DatabentoError("Databento refused DATABENTO_API_KEY in .env on box1: check the key") from None
-            end = _available_end(detail) if exc.code == 422 and "data_end_after_available_end" in detail else None
+            latest = exc.code == 422 and any(case in detail for case in _LATEST_END_CASES)
+            end = _available_end(detail) if latest else None
             if end is not None:
                 raise _PastAvailableEnd(end) from None
             if exc.code in (500, 502, 503, 504):
@@ -203,10 +221,11 @@ class DatabentoSource:
 
     def _ranged(self, path: str, symbol: str, start: datetime, end: datetime,
                 extra: dict[str, str] | None = None) -> bytes | None:
-        """POST a request for start..end. When `end` is past what Databento has (its
-        history runs a few minutes behind the market), ask again up to the end it names.
+        """POST a request for start..end. When `end` is past what Databento serves (its
+        history runs a few minutes behind the market, and the last day or so needs a
+        live-data license), ask again up to the end it names.
         None when it has nothing after `start` yet."""
-        for _ in range(2):
+        for _ in range(3):  # Databento may name an earlier end twice (behind, then unlicensed)
             if end <= start:
                 return None
             try:
