@@ -7,13 +7,16 @@ from __future__ import annotations
 
 from types import ModuleType
 
-from fleet2.models import crypto_trend, dip_buy, momentum, pairs
+from fleet2.models import crypto_trend, dip_buy, low_vol, momentum, near_high, pairs, reversal
 
 REGISTRY: dict[str, ModuleType] = {
     "momentum": momentum,
     "dip_buy": dip_buy,
     "crypto_trend": crypto_trend,
     "pairs": pairs,
+    "reversal": reversal,
+    "near_high": near_high,
+    "low_vol": low_vol,
 }
 
 

@@ -3,7 +3,8 @@
 Ranking: models are ranked by ROI on the held-out period, the part of history that
 model search never sees. A model with under 100 held-out trades is labelled "not
 enough trades" and cannot be ranked first: models with enough trades come first, by
-ROI, then the rest, by ROI, then models not backtested yet.
+ROI, then the rest, by ROI, then models not backtested yet. A held-out t-statistic
+under 1.96 is labelled "could be luck" (it does not change the ranking).
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ import psycopg
 from coordinator.fleet_view import TZ
 from coordinator.models import STATUS_TEXT, list_models
 from coordinator.settings import get_setting
-from fleet2.sim.metrics import MIN_TRADES
+from fleet2.sim.metrics import LUCK_T, MIN_TRADES
 from fleet2.universe import MARKETS
 
 # The descriptions under each metric, word for word from the owner's spec.
@@ -34,7 +35,21 @@ METRICS = (
     ("profit_factor", "Profit factor", "Dollars won for every dollar lost. Above 1.0 is profitable. 1.5 or more is strong."),
     ("trades", "Trades", "How many trades these results are based on. Under about 100, the numbers could just be luck."),
     ("avg_hold_s", "Average hold", "How long the model usually keeps a position before selling."),
+    ("t_stat", "Luck test",
+     "The Sharpe ratio scaled up by how long the test ran (its t-statistic). Under 1.96, the result can't be told "
+     "apart from luck. Model search tries many settings, so some pass by chance: the higher, the better."),
+    ("years", "Years tested",
+     "How long the held-out period is. A model needs about (1.96 ÷ Sharpe)² years to prove itself, so a Sharpe "
+     "of 0.5 needs about 15 years."),
+    ("beta", "Beta",
+     "How much the model moves with SPY (or BTC). 1 means it rises and falls with it, 0 means it ignores it. "
+     "A high beta means much of the return is just the market."),
+    ("alpha", "Alpha",
+     "Return per year the model made on top of what its beta alone would have earned. Above zero means it added "
+     "something the market didn't hand it."),
 )
+LUCK_NOTE = "Could be luck"
+OLD_RESULT = "Backtest again to see this"
 MARKET_TEXT = {"stocks": "Stocks", "crypto": "Crypto", "futures": "Futures"}
 SPARK_POINTS = 40
 
@@ -65,7 +80,7 @@ def _tone(value: float | None, good_above: float = 0.0) -> str:
 
 
 def metric_cards(held: dict[str, Any], market: str) -> list[dict[str, Any]]:
-    """The eight cards, each with its value, tone, word-for-word description and a note."""
+    """The metric cards, each with its value, tone, word-for-word description and a note."""
     bench = MARKETS[market]["benchmark"].split("/")[0]
     cards = []
     for key, label, description in METRICS:
@@ -95,8 +110,50 @@ def metric_cards(held: dict[str, Any], market: str) -> list[dict[str, Any]]:
                         note=None if enough else "Not enough trades: these results could be luck")
         elif key == "avg_hold_s":
             card.update(value=hold_text(value))
+        elif key == "t_stat":
+            card.update(**_luck_card(held))
+        elif key == "years":
+            card.update(value="-" if value is None else f"{value:.1f} years",
+                        note=OLD_RESULT if key not in held else None)
+        elif key == "beta":
+            card.update(value="-" if value is None else f"{value:.2f}".replace("-", "−"),
+                        note=f"Compared with {bench}" if value is not None
+                        else _missing_note(held, key, f"Not enough {bench} price moves to measure"))
+        elif key == "alpha":
+            card.update(value=signed_pct(value), tone=_tone(value),
+                        note=_missing_note(held, key, f"Not enough {bench} price moves to measure"))
         cards.append(card)
     return cards
+
+
+def could_be_luck(held: dict[str, Any] | None) -> bool:
+    """True when the held-out t-statistic is known and under LUCK_T."""
+    t = (held or {}).get("t_stat")
+    return t is not None and t < LUCK_T
+
+
+def _missing_note(held: dict[str, Any], key: str, unmeasurable: str) -> str | None:
+    if key not in held:
+        return OLD_RESULT
+    return unmeasurable if held.get(key) is None else None
+
+
+def _luck_card(held: dict[str, Any]) -> dict[str, Any]:
+    """The luck test's value, tone and note: how far from 1.96, and how many years the
+    model's Sharpe ratio would need to get there."""
+    t = held.get("t_stat")
+    if t is None:
+        return {"value": "-", "note": _missing_note(held, "t_stat", "Not enough ups and downs to measure")}
+    value = f"{t:.2f}".replace("-", "−")
+    years, sr = held.get("years"), held.get("sharpe")
+    if t >= LUCK_T:
+        return {"value": value, "tone": "gain",
+                "note": f"Passes: unlikely to be luck alone over {years:.1f} years" if years else "Passes"}
+    if sr is None or sr <= 0:
+        return {"value": value, "tone": "warn", "note": f"{LUCK_NOTE}: it did not make money on this period"}
+    needed = (LUCK_T / sr) ** 2
+    return {"value": value, "tone": "warn",
+            "note": f"{LUCK_NOTE}: at this Sharpe ratio it needs about {needed:,.0f} years of results to pass"}
 
 
 def _spark(curve: dict[str, Any] | None) -> list[float]:
@@ -137,6 +194,7 @@ def list_row(m: dict[str, Any], held_out_starts: dict[str, Any] | None = None) -
         "enough_trades": enough and not stale and m["status"] != "retired",
         "retired": m["status"] == "retired",
         "not_enough": bool(held) and not enough,
+        "luck": could_be_luck(held),
         "stale": stale,
         "spark": _spark(held.get("curve") if held else None),
     }
@@ -172,6 +230,8 @@ def detail(m: dict[str, Any], paper: dict[str, Any] | None = None) -> dict[str, 
     tags = [MARKET_TEXT[market], STATUS_TEXT[m["status"]]]
     if held and int(held.get("trades") or 0) < MIN_TRADES:
         tags.append("Not enough trades")
+    if could_be_luck(held):
+        tags.append(LUCK_NOTE)
     out: dict[str, Any] = {
         "id": m["id"],
         "name": m["name"],

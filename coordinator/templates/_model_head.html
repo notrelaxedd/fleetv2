@@ -1,6 +1,6 @@
 <h2 class="mtitle" data-model-name>{{ selected.name }}</h2>
 <p class="tags" data-model-tags>
-  {% for tag in selected.tags %}<span class="tag{% if tag == 'Not enough trades' %} warn{% endif %}" data-tag>{{ tag }}</span>{% endfor %}
+  {% for tag in selected.tags %}<span class="tag{% if tag in ('Not enough trades', 'Could be luck') %} warn{% endif %}" data-tag>{{ tag }}</span>{% endfor %}
 </p>
 <p class="mhow" data-how-it-works>{{ selected.how_it_works }}</p>
 <p class="muted small" data-origin>{{ selected.origin }}</p>

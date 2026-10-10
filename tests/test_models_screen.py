@@ -30,9 +30,9 @@ def real_metrics() -> dict:
     return copy.deepcopy(_REAL)
 
 
-def metrics_with(roi: float, trades: int) -> dict:
+def metrics_with(roi: float, trades: int, t_stat: float = 2.5) -> dict:
     m = real_metrics()
-    m["held_out"].update(roi=roi, trades=trades, enough_trades=trades >= 100)
+    m["held_out"].update(roi=roi, trades=trades, enough_trades=trades >= 100, t_stat=t_stat)
     return m
 
 
@@ -52,11 +52,11 @@ def page_ids(html: str) -> list[str]:
 def test_list_is_ranked_with_rank_and_signed_roi(client, stored):
     html = client.get("/models").text
     # enough trades first by ROI, then not enough trades, then not tested
-    assert page_ids(html) == ["momentum", "dip_buy", "pairs", "crypto_trend"]
+    assert page_ids(html) == ["momentum", "dip_buy", "pairs", "low_vol", "crypto_trend", "near_high", "reversal"]
     assert re.findall(r'data-rank="(\d+)"', html) == ["1", "2"]  # only models with 100+ trades get a rank
     rows = html.split("data-models-list", 1)[1]
     rois = [re.sub(r"\s+", " ", unescape(m)).strip() for m in re.findall(r"<[^>]*data-roi[^>]*>(.*?)</", rows, re.S)]
-    assert rois == ["+20.0%", "+5.0%", "+50.0%", "-"]
+    assert rois == ["+20.0%", "+5.0%", "+50.0%", "-", "-", "-", "-"]
     assert 'data-roi data-tone="gain"' in html
 
 
@@ -120,7 +120,7 @@ def test_detail_has_name_tags_explanation_and_origin(client, stored):
     assert element(html, "data-origin") == "Starter model"
 
 
-def test_eight_metric_cards_with_labels_and_descriptions_word_for_word(client, stored):
+def test_metric_cards_with_labels_and_descriptions_word_for_word(client, stored):
     html = client.get("/models?id=momentum").text
     cards = attr_tags(html, "data-metric")
     assert [re.search(r'data-metric="(\w+)"', c).group(1) for c in cards] == [k for k, _, _ in models_view.METRICS]
@@ -144,6 +144,52 @@ def test_a_card_note_shows_only_when_there_is_one(client, stored):
     assert "Not enough trades: these results could be luck" in text(trades)
     roi = html[html.index('data-metric="roi"'):html.index('data-metric="vs_buy_and_hold"')]
     assert "data-note" not in roi
+
+
+def test_could_be_luck_tag_and_the_luck_card_note(client, conn):
+    m = metrics_with(0.20, 150, t_stat=1.2)
+    m["held_out"].update(sharpe=0.6, years=4.0)
+    models.store_backtest(conn, "momentum", m, None)
+    models.store_backtest(conn, "dip_buy", metrics_with(0.05, 150, t_stat=3.1), None)
+    html = client.get("/models?id=momentum").text
+    assert len(attr_tags(html, 'data-tag="luck"')) == 1
+    row = html[html.index('data-model="momentum"'):html.index('data-model="dip_buy"')]
+    assert element(row, 'data-tag="luck"') == "Could be luck"
+    detail = html[html.index("data-model-tags"):html.index("data-how-it-works")]
+    assert "Could be luck" in text(detail)
+    card = html[html.index('data-metric="t_stat"'):html.index('data-metric="years"')]
+    assert element(card, "data-value") == "1.20" and 'data-tone="warn"' in card
+    assert "needs about 11 years of results to pass" in text(card)  # (1.96 / 0.6)^2 = 10.7
+    years = html[html.index('data-metric="years"'):html.index('data-metric="beta"')]
+    assert element(years, "data-value") == "4.0 years"
+    html = client.get("/models?id=dip_buy").text
+    detail = html[html.index("data-model-tags"):html.index("data-how-it-works")]
+    assert "Could be luck" not in text(detail)
+    card = html[html.index('data-metric="t_stat"'):html.index('data-metric="years"')]
+    assert 'data-tone="gain"' in card and "Passes" in text(card)
+
+
+def test_results_from_before_the_luck_test_ask_for_a_new_backtest(client, conn):
+    m = real_metrics()
+    for key in ("t_stat", "years", "beta", "alpha"):
+        m["held_out"].pop(key)
+    m["held_out"].update(trades=150, enough_trades=True)
+    models.store_backtest(conn, "momentum", m, None)
+    html = client.get("/models?id=momentum").text
+    assert 'data-tag="luck"' not in html
+    cards = html[html.index('data-metric="t_stat"'):]
+    assert text(cards).count("Backtest again to see this") == 4
+
+
+def test_beta_and_alpha_cards_name_the_benchmark(client, conn):
+    m = metrics_with(0.20, 150)
+    m["held_out"].update(beta=0.85, alpha=-0.031)
+    models.store_backtest(conn, "momentum", m, None)
+    html = client.get("/models?id=momentum").text
+    beta = html[html.index('data-metric="beta"'):html.index('data-metric="alpha"')]
+    assert element(beta, "data-value") == "0.85" and "Compared with SPY" in text(beta)
+    alpha = html[html.index('data-metric="alpha"'):]
+    assert element(alpha, "data-value") == "−3.1%" and 'data-tone="loss"' in alpha
 
 
 def test_chart_has_two_labelled_series_solid_and_dashed(client, stored):

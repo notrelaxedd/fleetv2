@@ -142,8 +142,9 @@ with the lowest CPU), to one worker, or to every idle worker:
 First run, in order:
 
 1. Assign a **Data refresh** and wait for it to finish. Backtests need the prices.
-2. **Run backtest** for each of the four starter models (Momentum, Dip buyer, Crypto
-   trend, Pairs), from the Models screen or Assign a job.
+2. **Run backtest** for each of the seven starter models (Momentum, Dip buyer, Crypto
+   trend, Pairs, Weekly losers, Near yearly high, Calm stocks), from the Models screen or
+   Assign a job.
 3. Open **Models** to compare them.
 
 ![Fleet screen](docs/screenshots/stage5-fleet-desktop.png)
@@ -151,9 +152,9 @@ First run, in order:
 **Models** lists every model ranked by ROI on the held-out period (the last part of the
 prices, see "Honest backtesting"). A model with under 100 trades says "Not enough
 trades" and is never ranked first. Pick a model to see its Growth of $100 chart against
-buying and holding SPY (or BTC for crypto), and eight numbers: ROI, vs. buy and hold,
-max drawdown, Sharpe ratio, win rate, profit factor, trades and average hold. Each has a
-plain-words explanation under it.
+buying and holding SPY (or BTC for crypto), and twelve numbers: ROI, vs. buy and hold,
+max drawdown, Sharpe ratio, win rate, profit factor, trades, average hold, luck test,
+years tested, beta and alpha. Each has a plain-words explanation under it.
 
 **Start paper trading** (on a tested model) gives the model its own virtual book of
 $10,000 and a worker to run it. The worker sends the model's decisions to the
@@ -536,8 +537,19 @@ What the simulator reports for a model, at each contract size it tries:
   never sees it, and models are ranked on it only.
 - **Benchmark.** Buy and hold SPY for stock models, BTC for crypto models, over the same
   period.
+- **Luck test** (stock and crypto models). The held-out t-statistic is the Sharpe ratio times the square root of
+  the years tested. Under 1.96 the model is tagged "Could be luck". It is a label, not a
+  rank change. The held-out period is short (about 2.7 years for stocks, 1.4 for
+  crypto), so a stock model needs a Sharpe above about 1.2 to pass, and a crypto model
+  above about 1.6. Model search tries many settings, so some pass by chance.
+- **Beta and alpha.** Beta is how much the model moves with SPY (or BTC). Alpha is the
+  return per year left after taking that out. A model with a high beta and no alpha is
+  mostly the market.
 - **Same limits as paper trading.** Backtests use the same balance and the same
   per-position and per-model caps.
+
+Results saved before the luck test existed show "Backtest again to see this" on the
+four new cards until the model is backtested again.
 
 Futures models have their own backtester (`fleet2/sim/futures_backtest.py`) with the
 same promise, adapted to day trading:
@@ -556,6 +568,15 @@ same promise, adapted to day trading:
   (Topstep's own deadline is 15:10). Half days close at 12:00.
 - **Results by day:** profit or loss, the worst moment of the day including open trades
   (that is what Topstep's loss limit watches), trades and minutes held.
+
+## Where the newer starter models come from
+
+Weekly losers (short-term reversal), Near yearly high (52-week high) and Calm stocks
+(low volatility) are published effects listed in
+[awesome-systematic-trading](https://github.com/paperswithbacktest/awesome-systematic-trading).
+They are re-written for the fleet: buy-only, price data only, and the same 20 stocks
+as the other stock models. The papers' versions also sell short and use far bigger
+universes. No code was copied (that repo has no license).
 
 ## When a worker goes offline
 

@@ -187,7 +187,8 @@ def test_assign_panel_dropdowns(client, conn):
     assert kind.count("disabled") == 0
     assert "Test one model on past prices and save its results." in html
     model = html[html.index('data-field="model"'):html.index('data-field="worker"')]
-    assert re.findall(r"<option [^>]*>([^<]*)</option>", model) == ["Crypto trend", "Dip buyer", "Momentum", "Pairs"]
+    assert re.findall(r"<option [^>]*>([^<]*)</option>", model) == ["Calm stocks", "Crypto trend", "Dip buyer", "Momentum",
+                                                                                 "Near yearly high", "Pairs", "Weekly losers"]
     worker = html[html.index('data-field="worker"'):]
     assert re.findall(r"<option [^>]*>([^<]*)</option>", worker)[:3] == ["Auto — pick the least busy", "w1", "All idle workers"]
     assert not re.search(r'<button[^>]*data-action="assign"[^>]*disabled', html)

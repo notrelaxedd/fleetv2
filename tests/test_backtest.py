@@ -21,7 +21,7 @@ from fleet2.sim.backtest import (COSTS, MIN_TRADE_DOLLARS, Costs, Limits, Run, T
                                  run_backtest, split_index)
 from fleet2.sim.control import JobStopped
 from fleet2.sim.marketdata import History, MarketData
-from fleet2.sim.metrics import MIN_TRADES, curve, max_drawdown, sharpe, summarize
+from fleet2.sim.metrics import MIN_TRADES, beta_alpha, curve, max_drawdown, sharpe, summarize, t_stat
 from fleet2.universe import MARKETS
 from fleet2.worker.backtest_job import backtest_periods, signed_pct, summary_line
 
@@ -958,3 +958,38 @@ def test_should_stop_raises_job_stopped_and_progress_ends_at_one():
     with pytest.raises(JobStopped):
         run_backtest(data, always("AAPL", every=5), None, 0, 120, should_stop=lambda: calls.append(1) or len(calls) > 10)
     assert len(calls) == 11
+
+
+def test_t_stat_is_the_sharpe_ratio_times_the_root_of_the_years_tested():
+    rng = np.random.default_rng(5)
+    equity = 100.0 * np.cumprod(1.0 + rng.normal(0.001, 0.01, 504))
+    s = summarize(make_run(equity))
+    assert s["years"] == pytest.approx(2.0)
+    assert s["t_stat"] == pytest.approx(s["sharpe"] * np.sqrt(2.0))
+    # the same thing as the mean per-bar return over its standard error
+    full = np.concatenate(([100.0], equity))
+    r = np.diff(full) / full[:-1]
+    assert s["t_stat"] == pytest.approx(np.mean(r) / np.std(r, ddof=1) * np.sqrt(r.shape[0]))
+    assert t_stat(None, 504, 252) is None and t_stat(1.0, 0, 252) is None
+    assert summarize(make_run([100.0, 100.0, 100.0]))["t_stat"] is None  # no ups and downs
+
+
+def test_beta_and_alpha_recover_a_known_exposure():
+    rng = np.random.default_rng(11)
+    rb = rng.normal(0.0005, 0.01, 400)
+    rm = 0.5 * rb + 0.0002  # half the market's moves, plus 0.02% a bar of its own
+    bench = 100.0 * np.cumprod(np.concatenate(([1.0], 1.0 + rb)))
+    model = 100.0 * np.cumprod(np.concatenate(([1.0], 1.0 + rm)))
+    beta, alpha = beta_alpha(model, bench, 252)
+    assert beta == pytest.approx(0.5)
+    assert alpha == pytest.approx(0.0002 * 252)
+    s = summarize(make_run(model[1:], benchmark=bench[1:]))
+    assert s["beta"] == pytest.approx(0.5) and s["alpha"] == pytest.approx(0.0002 * 252)
+
+
+def test_beta_and_alpha_are_none_without_a_benchmark_or_without_benchmark_moves():
+    s = summarize(make_run([100.0, 101.0, 99.0, 102.0, 103.0]))
+    assert s["beta"] is None and s["alpha"] is None
+    s = summarize(make_run([100.0, 101.0, 99.0, 102.0, 103.0], benchmark=[100.0] * 5))
+    assert s["beta"] is None and s["alpha"] is None
+    assert beta_alpha(np.array([100.0, 101.0]), np.array([100.0, 102.0]), 252) == (None, None)
