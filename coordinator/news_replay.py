@@ -24,6 +24,9 @@ Things this module insists on:
   so a second run carries on where the first stopped and never repeats a payment.
 - Articles the live loop has already seen keep their status; only 'backfill' articles
   (stored for replay, never queued for the live analyst) are replayed.
+- An article edited after its decision time (updated_at later than created_at +
+  REPLAY_DELAY) is skipped, and counted as such: Alpaca serves only an article's latest
+  text, which may already tell of the price reaction the replay is meant to predict.
 """
 from __future__ import annotations
 
@@ -50,6 +53,8 @@ MAX_FAILURES_IN_A_ROW = 3    # stop after this many failed analyses in a row (ba
 ESTIMATE_PER_ARTICLE_USD = 0.05  # a rough typical cost of one article, for the dry-run estimate
 MAX_SCORING_BATCHES = 200   # a safety bound on the scoring loop
 LOCK_KEY = 7_402_009         # one replay at a time (Postgres advisory lock)
+EDITED_REASON = ("edited after the decision time: Alpaca gives only an article's latest text, which may already "
+                 "tell of the price reaction")
 
 
 def _utc(value: datetime) -> datetime:
@@ -109,8 +114,10 @@ def replay(conn: psycopg.Connection, news_source: Any, analyst: Any, settings: A
 
     Returns {"fetched": articles newly stored by the backfill, "waiting": articles to
     replay when it started, "replayed": articles analysed, "failed": of those, analyses
-    that failed, "predictions": predictions saved, "cost": dollars spent by this run,
-    "stopped_by": None or why it stopped early, "scored": predictions scored}.
+    that failed, "skipped": articles not sent because they were edited after their
+    decision time, "skipped_why": why (None when none was), "predictions": predictions
+    saved, "cost": dollars spent by this run, "stopped_by": None or why it stopped early,
+    "scored": predictions scored}.
     Raises ValueError when the window or the analyst is refused (see the module docstring).
     Commit after each article is the caller's connection's business: use an autocommit
     connection, so that an interruption never loses a payment already made."""
@@ -136,12 +143,19 @@ def _run(conn: psycopg.Connection, news_source: Any, analyst: Any, settings: AiS
     ids = _waiting_ids(conn, since, until)
     log(f"replay {since:%Y-%m-%d %H:%M} to {until:%Y-%m-%d %H:%M} UTC: {fetched} new articles stored, "
         f"{len(ids)} waiting to be replayed, up to ${max_usd:,.2f} to spend")
-    out: dict[str, Any] = {"fetched": fetched, "waiting": len(ids), "replayed": 0, "failed": 0, "predictions": 0,
-                           "cost": 0.0, "stopped_by": None, "scored": 0}
+    out: dict[str, Any] = {"fetched": fetched, "waiting": len(ids), "replayed": 0, "failed": 0, "skipped": 0,
+                           "skipped_why": None, "predictions": 0, "cost": 0.0, "stopped_by": None, "scored": 0}
     in_a_row = 0
     for done, news_id in enumerate(ids):
+        if done and done % PROGRESS_EVERY == 0:
+            log(f"replayed {out['replayed']} of {len(ids)} articles, {_skipped(out)}{out['predictions']} "
+                f"predictions, ${out['cost']:,.2f} spent")
         row = conn.execute("SELECT * FROM news WHERE id = %s", (news_id,)).fetchone()
         decided_at = row["created_at"] + REPLAY_DELAY
+        if row["updated_at"] is not None and row["updated_at"] > decided_at:
+            out["skipped"] += 1
+            out["skipped_why"] = EDITED_REASON
+            continue
         context = research.build_context(conn, row, decided_at, None)
         worst = float(analyst.worst_cost(row, context))
         if worst > 0:
@@ -171,16 +185,18 @@ def _run(conn: psycopg.Connection, news_source: Any, analyst: Any, settings: AiS
                 break
         else:
             in_a_row = 0
-        if (done + 1) % PROGRESS_EVERY == 0:
-            log(f"replayed {done + 1} of {len(ids)} articles, {out['predictions']} predictions, "
-                f"${out['cost']:,.2f} spent")
     # score_pending does one batch of at most BATCH predictions; a replay can leave more.
     for _ in range(MAX_SCORING_BATCHES):
         n = news_scoring.score_pending(conn, limits, now)
         out["scored"] += n
         if n < news_scoring.BATCH:
             break
-    log(f"replayed {out['replayed']} of {len(ids)} articles, {out['predictions']} predictions, "
+    log(f"replayed {out['replayed']} of {len(ids)} articles, {_skipped(out)}{out['predictions']} predictions, "
         f"${out['cost']:,.2f} spent, {out['scored']} predictions scored"
         + (f"; stopped by {out['stopped_by']}" if out["stopped_by"] else ""))
     return out
+
+
+def _skipped(out: dict[str, Any]) -> str:
+    """The skipped articles for a progress line ("" when none were)."""
+    return f"{out['skipped']} skipped ({out['skipped_why']}), " if out["skipped"] else ""

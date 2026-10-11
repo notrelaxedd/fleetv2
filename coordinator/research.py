@@ -25,6 +25,15 @@ what was known when it decided, and that nothing it answers is trusted unchecked
   ai_calls: feature "news" for live calls (that is the live daily spend, spent_today)
   and "news_replay" for replayed ones. Problems (a refused key, a busy server, a
   refusal, a cut-off answer) become a failed analysis, never a crash.
+- A paid call is never lost and never repeated. The live loop claims an article (marks
+  it "failed: being analysed", committed) before the call, so it can never go back to
+  "pending" and be paid for again, however the rest goes. No transaction is open during
+  the call. The ai_calls row is committed on its own as soon as the call returns, before
+  the answer is saved, so a failure while saving cannot take the spend record with it;
+  such a failure marks the article "failed". A call that ends in a timeout, a dropped
+  connection or a server error (5xx) may still have been billed, so it is recorded at
+  the most it could have cost, not at $0. NUL characters (which Postgres cannot store)
+  are removed from Claude's answer before it is read or saved.
 
 The analyst itself (ClaudeAnalyst, or FakeAnalyst in demo mode) never touches the
 database: analyse_article checks the caps, makes the call through it and records
@@ -61,6 +70,15 @@ MAX_MOVE_PCT = 100.0        # a bigger predicted move is not believed
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 NO_KEY_PROBLEM = "Add ANTHROPIC_API_KEY to .env on box1"
 FAKE_MODEL = "fake-analyst"
+# The news analyst's own client. No retries: the SDK would otherwise resend a request that
+# timed out or met a server error, and each attempt may be billed while analyse_article
+# records one call. A timeout long enough for a whole answer of news_max_tokens from Opus
+# (at no less than 25 tokens a second), and never under ten minutes.
+NEWS_MAX_RETRIES = 0
+NEWS_MIN_TIMEOUT_S = 600.0
+NEWS_MIN_TOKENS_PER_S = 25.0
+CLAIM_NOTE = ("being analysed since {at:%Y-%m-%d %H:%M} UTC; if this stays, the analysis stopped halfway "
+              "(Claude may have been paid) and it is not tried again")
 
 # US dollars per million tokens (in, out) for the models a refusal fallback may answer
 # with. The configured model uses the prices in config/ai.toml; a model in neither place
@@ -165,6 +183,19 @@ def _clean(text: Any, limit: int) -> str:
     if len(s) > limit:
         s = s[:limit].rstrip() + "\n(truncated)"
     return s
+
+
+def _no_nul(value: Any) -> Any:
+    """The value with every NUL character removed from its strings (also inside lists and
+    dicts). Postgres cannot store NUL in text or jsonb, and Claude's JSON may carry one
+    (as \\u0000): left in, it would make saving the answer fail after the call was paid."""
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {_no_nul(k): _no_nul(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_no_nul(v) for v in value]
+    return value
 
 
 def ours(article: dict[str, Any]) -> list[str]:
@@ -332,6 +363,14 @@ def _out_of_range(item: dict[str, Any]) -> str | None:
 # ------------------------------------------------------------------ analysts
 
 
+def dearest_prices(settings: AiSettings) -> tuple[float, float]:
+    """The highest prices (in, out) any model that may answer can charge: the configured
+    one or any refusal fallback. The worst case of a call is priced at these, so a
+    fallback answering at a dearer rate can never take the spend past a cap."""
+    return (max([settings.news_input_per_million] + [p[0] for p in FALLBACK_PRICES.values()]),
+            max([settings.news_output_per_million] + [p[1] for p in FALLBACK_PRICES.values()]))
+
+
 def prices_for(model: str, settings: AiSettings) -> tuple[float, float]:
     """US dollars per million tokens (in, out) for the model that answered."""
     if model == settings.news_model or model.startswith(settings.news_model + "-"):
@@ -339,8 +378,33 @@ def prices_for(model: str, settings: AiSettings) -> tuple[float, float]:
     for name, prices in FALLBACK_PRICES.items():
         if model == name or model.startswith(name + "-"):
             return prices
-    return (max([settings.news_input_per_million] + [p[0] for p in FALLBACK_PRICES.values()]),
-            max([settings.news_output_per_million] + [p[1] for p in FALLBACK_PRICES.values()]))
+    return dearest_prices(settings)
+
+
+def make_news_client(key: str, settings: AiSettings) -> Any:
+    """The news analyst's Anthropic client: no retries, a timeout for a whole answer
+    (see NEWS_MAX_RETRIES). Not haiku.make_client, whose retries and 120 s suit Haiku."""
+    import anthropic
+
+    timeout = max(NEWS_MIN_TIMEOUT_S, settings.news_max_tokens / NEWS_MIN_TOKENS_PER_S)
+    return anthropic.Anthropic(api_key=key, max_retries=NEWS_MAX_RETRIES, timeout=timeout)
+
+
+def maybe_billed(exc: Exception) -> bool:
+    """Whether a call that raised may still have been billed by Anthropic: a timeout or a
+    dropped connection (the request may have run to the end on Anthropic's side) or a
+    server error (5xx, e.g. 500, 529 overloaded). A 4xx answer (a refused key, a bad
+    request, a rate limit) was not run, so it costs nothing."""
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status >= 500
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    try:
+        import anthropic
+    except ImportError:  # pragma: no cover - anthropic is a dependency
+        return False
+    return isinstance(exc, anthropic.APIConnectionError)  # APITimeoutError is one too
 
 
 class ClaudeAnalyst:
@@ -368,12 +432,13 @@ class ClaudeAnalyst:
         }
 
     def worst_cost(self, article: dict[str, Any], context: dict[str, Any]) -> float:
-        """The most this call can cost: its prompt plus a whole answer of max_tokens."""
+        """The most this call can cost: its prompt plus a whole answer of max_tokens, at
+        the dearest prices of the configured model and every refusal fallback."""
         req = self.request(article, context)
         prompt = haiku.tokens_of(SYSTEM, req["messages"][0]["content"],
                                  json.dumps(req["output_config"]["format"]["schema"]))
-        return (prompt * self.settings.news_input_per_million
-                + self.settings.news_max_tokens * self.settings.news_output_per_million) / 1e6
+        price_in, price_out = dearest_prices(self.settings)
+        return (prompt * price_in + self.settings.news_max_tokens * price_out) / 1e6
 
     def analyse(self, article: dict[str, Any], context: dict[str, Any]) -> AnalysisResult:
         symbols = ours(article)
@@ -381,11 +446,21 @@ class ClaudeAnalyst:
                               prompt_version=PROMPT_VERSION, input_tokens=0, output_tokens=0, cache_read_tokens=0,
                               cache_write_tokens=0, cost_usd=0.0, stop_reason=None, raw={})
         try:
-            client = self._client or haiku.make_client(self._key)
+            request = self.request(article, context)
+            client = self._client or make_news_client(self._key, self.settings)
             self._client = client
-            response = client.beta.messages.create(**self.request(article, context))
+        except Exception as exc:  # noqa: BLE001 - nothing was sent, so nothing was paid
+            return replace(base, error=haiku.error_text(exc), made_call=False)
+        try:
+            response = client.beta.messages.create(**request)
         except Exception as exc:  # noqa: BLE001 - a failed analysis, never a crash
-            return replace(base, error=haiku.error_text(exc))
+            error = haiku.error_text(exc)
+            if maybe_billed(exc):
+                # Anthropic may have run (and billed) the request although we got no answer:
+                # count it at the most it could have cost, never at $0, so the caps stay safe.
+                return replace(base, error=f"{error} (counted at its worst-case cost)",
+                               cost_usd=self.worst_cost(article, context))
+            return replace(base, error=error)
         usage = getattr(response, "usage", None)
         tokens = {k: int(getattr(usage, k, 0) or 0) for k in
                   ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")}
@@ -402,7 +477,7 @@ class ClaudeAnalyst:
             category = getattr(details, "category", None) if details is not None else None
             return replace(result, error="refused" + (f" ({category})" if category else ""),
                            raw={"stop_reason": stop, "category": category})
-        text = _answer_text(response)
+        text = _no_nul(_answer_text(response))
         if stop == "max_tokens":
             return replace(result, error="bad: the answer was cut off (max_tokens)",
                            raw={"stop_reason": stop, "text": text[:5000]})
@@ -412,6 +487,7 @@ class ClaudeAnalyst:
                 raise ValueError("not an object")
         except ValueError as exc:
             return replace(result, error=f"bad: unreadable answer ({exc})"[:200], raw={"text": text[:5000]})
+        data = _no_nul(data)  # an escaped NUL (\u0000) is a NUL again once parsed
         predictions, dropped = validate(data, symbols)
         return replace(result, predictions=predictions, dropped=dropped, raw=data)
 
@@ -604,6 +680,58 @@ def _set_status(conn: psycopg.Connection, news_id: int, status: str, note: str) 
                  (status, note[:500], news_id))
 
 
+def _no_open_transaction(conn: psycopg.Connection) -> None:
+    """Commit the transaction a non-autocommit connection (the loop's pool connections)
+    opened by itself on its first statement, so that no transaction is open during a
+    paid call and the next `with conn.transaction()` is the outermost block, which
+    commits at its end. An autocommit connection has nothing to commit. Inside a
+    caller's own `with conn.transaction()` nothing could be committed on its own, so
+    psycopg refuses and this raises, before any money is spent."""
+    if conn.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
+        conn.commit()
+
+
+def _scrub(result: AnalysisResult) -> AnalysisResult:
+    """Every text of a result that is saved, without NUL characters (see _no_nul)."""
+    return replace(result, requested_model=_no_nul(result.requested_model), served_model=_no_nul(result.served_model),
+                   stop_reason=_no_nul(result.stop_reason), raw=_no_nul(result.raw), error=_no_nul(result.error),
+                   dropped=_no_nul(list(result.dropped)),
+                   predictions=[replace(p, symbol=_no_nul(p.symbol), rationale=_no_nul(p.rationale))
+                                for p in result.predictions])
+
+
+def _save_analysis(conn: psycopg.Connection, news_id: int, source: str, call_id: int | None,
+                   result: AnalysisResult, context: dict[str, Any], now: datetime,
+                   clock: datetime) -> list[dict[str, Any]]:
+    """The analysis, its predictions and the article's status (in the caller's transaction)."""
+    analysis = conn.execute(
+        "INSERT INTO news_analyses (news_id, source, ai_call_id, requested_model, served_model, prompt_version, "
+        "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, stop_reason, context, raw, "
+        "error, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+        (news_id, source, call_id, result.requested_model, result.served_model, result.prompt_version,
+         result.input_tokens, result.output_tokens, result.cache_read_tokens, result.cache_write_tokens,
+         result.cost_usd, result.stop_reason, Jsonb(context), Jsonb(result.raw) if result.raw else None,
+         result.error, clock)).fetchone()
+    saved = []
+    for p in ([] if result.error else result.predictions):
+        price = (context.get("symbols", {}).get(p.symbol) or {}).get("price_now")
+        saved.append(conn.execute(
+            "INSERT INTO news_predictions (analysis_id, news_id, source, model, symbol, market, direction, "
+            "expected_move_pct, horizon_days, confidence, already_priced_in, rationale, decided_at, "
+            "price_at_decision) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+            (analysis["id"], news_id, source, result.served_model, p.symbol, universe.market_of(p.symbol),
+             p.direction, p.expected_move_pct, p.horizon_days, p.confidence, p.already_priced_in, p.rationale,
+             now, price)).fetchone())
+    if result.error:
+        _set_status(conn, news_id, "failed", result.error)
+    else:
+        note = f"{len(saved)} prediction{'s' if len(saved) != 1 else ''} by {result.served_model}"
+        if result.dropped:
+            note += f"; dropped {len(result.dropped)}: " + "; ".join(result.dropped)
+        _set_status(conn, news_id, "analysed", note)
+    return saved
+
+
 def analyse_article(conn: psycopg.Connection, analyst: Any, article_row: dict[str, Any], context: dict[str, Any],
                     now: datetime, source: str = "live", settings: AiSettings | None = None,
                     clock: datetime | None = None) -> list[dict[str, Any]]:
@@ -618,7 +746,14 @@ def analyse_article(conn: psycopg.Connection, analyst: Any, article_row: dict[st
     monthly cap, its own limit being the owner's --max-usd. Over a cap, no call is made
     and a live article is marked over_budget (a replayed one keeps its status, so it
     can be replayed later). Live calls are recorded in ai_calls as feature "news",
-    replayed ones as "news_replay". Never raises for an API problem."""
+    replayed ones as "news_replay". Never raises for an API problem.
+
+    Transactions: whatever the connection has open is committed before the call (it must
+    not be inside a `with conn.transaction()` block: that raises before the call). The
+    call is made with no transaction open. Its ai_calls row is then committed on its own,
+    and the analysis saved in a second transaction; if saving fails, the article is
+    marked "failed" (with a failed news_analyses row, so a replay never sends it again)
+    in a third, and an empty list is returned. So a paid call is always recorded."""
     if source not in ("live", "replay"):
         raise ValueError(f"unknown source {source!r}")
     news_id = int(article_row["id"])
@@ -633,6 +768,7 @@ def analyse_article(conn: psycopg.Connection, analyst: Any, article_row: dict[st
             _set_status(conn, news_id, "over_budget", f"not analysed: {capped}")
         log.info("news %s not analysed: %s", news_id, capped)
         return []
+    _no_open_transaction(conn)
     try:
         result = analyst.analyse(article_row, context)
     except Exception as exc:  # noqa: BLE001 - the analyst should not raise; if it does, a failed analysis
@@ -641,55 +777,57 @@ def analyse_article(conn: psycopg.Connection, analyst: Any, article_row: dict[st
                                 prompt_version=PROMPT_VERSION, input_tokens=0, output_tokens=0, cache_read_tokens=0,
                                 cache_write_tokens=0, cost_usd=0.0, stop_reason=None, raw={},
                                 error=haiku.error_text(exc), made_call=False)
+    result = _scrub(result)
     if result.error:
         log.warning("news %s: analysis failed: %s", news_id, result.error)
-    with conn.transaction():
-        call_id = None
-        if result.made_call:
+    call_id = None
+    if result.made_call:
+        # The spend record first, committed on its own (the outermost block on an idle
+        # connection), so that nothing that goes wrong below can roll it back.
+        with conn.transaction():
             call_id = haiku.record_call(
                 conn, FEATURE if source == "live" else REPLAY_FEATURE, result.served_model,
                 result.input_tokens + result.cache_read_tokens + result.cache_write_tokens, result.output_tokens,
                 result.cost_usd, _outcome(result),
                 detail={"news_id": news_id, "source": source, "requested_model": result.requested_model,
                         "kept": len(result.predictions), "dropped": result.dropped[:20]}, at=clock)
-        analysis = conn.execute(
+    try:
+        with conn.transaction():
+            return _save_analysis(conn, news_id, source, call_id, result, context, now, clock)
+    except Exception as exc:  # noqa: BLE001 - the call is paid and recorded: fail the article, never retry it
+        problem = _no_nul(f"error: the answer could not be saved ({type(exc).__name__}: {exc})")[:500]
+        log.exception("news %s: %s", news_id, problem)
+    with conn.transaction():
+        # No context or raw answer here: either may be what could not be saved.
+        conn.execute(
             "INSERT INTO news_analyses (news_id, source, ai_call_id, requested_model, served_model, prompt_version, "
-            "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, stop_reason, context, raw, "
-            "error, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, stop_reason, context, "
+            "error, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (news_id, source, call_id, result.requested_model, result.served_model, result.prompt_version,
              result.input_tokens, result.output_tokens, result.cache_read_tokens, result.cache_write_tokens,
-             result.cost_usd, result.stop_reason, Jsonb(context), Jsonb(result.raw) if result.raw else None,
-             result.error, clock)).fetchone()
-        saved = []
-        for p in ([] if result.error else result.predictions):
-            price = (context.get("symbols", {}).get(p.symbol) or {}).get("price_now")
-            saved.append(conn.execute(
-                "INSERT INTO news_predictions (analysis_id, news_id, source, model, symbol, market, direction, "
-                "expected_move_pct, horizon_days, confidence, already_priced_in, rationale, decided_at, "
-                "price_at_decision) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
-                (analysis["id"], news_id, source, result.served_model, p.symbol, universe.market_of(p.symbol),
-                 p.direction, p.expected_move_pct, p.horizon_days, p.confidence, p.already_priced_in, p.rationale,
-                 now, price)).fetchone())
-        if result.error:
-            _set_status(conn, news_id, "failed", result.error)
-        else:
-            note = f"{len(saved)} prediction{'s' if len(saved) != 1 else ''} by {result.served_model}"
-            if result.dropped:
-                note += f"; dropped {len(result.dropped)}: " + "; ".join(result.dropped)
-            _set_status(conn, news_id, "analysed", note)
-    return saved
+             result.cost_usd, result.stop_reason, Jsonb({}), problem, clock))
+        _set_status(conn, news_id, "failed", problem)
+    return []
 
 
 def analyse_pending(conn: psycopg.Connection, analyst: Any, settings: AiSettings, now: datetime,
                     price_now: PriceNow | None) -> dict[str, int]:
-    """One bounded step: the oldest waiting articles (at most MAX_PER_STEP), each claimed
-    with FOR UPDATE SKIP LOCKED so two loops never analyse the same one. Too old ->
-    skipped; over a cap -> over_budget (final: by tomorrow the news is stale)."""
+    """One bounded step: the oldest waiting articles (at most MAX_PER_STEP). Too old ->
+    skipped; over a cap -> over_budget (final: by tomorrow the news is stale).
+
+    Each article is claimed with FOR UPDATE SKIP LOCKED and marked "failed" (with a
+    "being analysed" note) in a transaction committed before the call, so two loops
+    never take the same article and, whatever happens during or after the call (even
+    the process dying), an article that may have been paid for never goes back to
+    "pending" to be paid for again. analyse_article then sets its final status. The
+    connection may be autocommit or not (the loop's pool connections are not); it is
+    left with no transaction open."""
     counts = {"analysed": 0, "failed": 0, "skipped": 0, "over_budget": 0, "predictions": 0}
     if not analyst.connected or not settings.news_enabled:
         return counts
     oldest = now - timedelta(hours=settings.news_max_article_age_hours)
     for _ in range(MAX_PER_STEP):
+        _no_open_transaction(conn)
         with conn.transaction():
             row = conn.execute("SELECT * FROM news WHERE analysis_status = 'pending' ORDER BY created_at, id "
                                "LIMIT 1 FOR UPDATE SKIP LOCKED").fetchone()
@@ -701,10 +839,15 @@ def analyse_pending(conn: psycopg.Connection, analyst: Any, settings: AiSettings
                             "(max_article_age_hours in config/ai.toml [news])")
                 counts["skipped"] += 1
                 continue
+            # Built under the claim: if it fails, the claim rolls back and nothing was spent.
             context = build_context(conn, row, now, price_now)
-            saved = analyse_article(conn, analyst, row, context, now, "live", settings=settings)
-            status = conn.execute("SELECT analysis_status FROM news WHERE id = %s", (row["id"],)).fetchone()
-            key = status["analysis_status"]
-            counts[key] = counts.get(key, 0) + 1
-            counts["predictions"] += len(saved)
+            _set_status(conn, row["id"], "failed", CLAIM_NOTE.format(at=now.astimezone(timezone.utc)))
+        saved = analyse_article(conn, analyst, row, context, now, "live", settings=settings)
+        _no_open_transaction(conn)
+        with conn.transaction():
+            key = conn.execute("SELECT analysis_status FROM news WHERE id = %s",
+                               (row["id"],)).fetchone()["analysis_status"]
+        counts[key] = counts.get(key, 0) + 1
+        counts["predictions"] += len(saved)
+    _no_open_transaction(conn)
     return counts

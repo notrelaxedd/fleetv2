@@ -229,10 +229,83 @@ def test_an_api_error_is_a_failed_analysis_not_a_crash(conn):
     boom.status_code = 529
     assert run(conn, FakeClient(error=boom)) == []
     a = conn.execute("SELECT * FROM news_analyses").fetchone()
-    assert a["error"] == "error: Anthropic answered 529" and a["cost_usd"] == 0
+    assert a["error"].startswith("error: Anthropic answered 529") and a["cost_usd"] > 0   # may have been billed
     call = conn.execute("SELECT * FROM ai_calls").fetchone()
-    assert call["outcome"] == "error: Anthropic answered 529" and a["ai_call_id"] == call["id"]
+    assert call["outcome"] == a["error"] and a["ai_call_id"] == call["id"]
     assert status(conn)["analysis_status"] == "failed"
+
+
+def _worst(conn, row, settings=SETTINGS):
+    return analyst(FakeClient(), settings).worst_cost(row, research.build_context(conn, row, NOW, None))
+
+
+def _anthropic_errors():
+    import anthropic
+    import httpx2
+
+    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+
+    def status_error(cls, code):
+        return cls("boom", response=httpx2.Response(code, request=request), body=None)
+
+    return [
+        ("timeout", TimeoutError("Request timed out."), True),
+        ("sdk timeout", anthropic.APITimeoutError(request=request), True),
+        ("connection", anthropic.APIConnectionError(request=request), True),
+        ("connection reset", ConnectionResetError("reset"), True),
+        ("500", status_error(anthropic.InternalServerError, 500), True),
+        ("529", status_error(anthropic.OverloadedError, 529), True),
+        ("504", status_error(anthropic.DeadlineExceededError, 504), True),
+        ("400", status_error(anthropic.BadRequestError, 400), False),
+        ("401", status_error(anthropic.AuthenticationError, 401), False),
+        ("429", status_error(anthropic.RateLimitError, 429), False),
+    ]
+
+
+@pytest.mark.parametrize("name,error,billed", _anthropic_errors(), ids=[e[0] for e in _anthropic_errors()])
+def test_a_call_that_may_have_been_billed_is_recorded_at_its_worst_cost(conn, name, error, billed):
+    """A timeout, a dropped connection or a 5xx may have been run and billed by Anthropic:
+    it counts against the caps at the most it could have cost, never as $0. A 4xx was not run."""
+    row = add_news(conn)
+    worst = _worst(conn, row)
+    assert run(conn, FakeClient(error=error), row) == []
+    call = conn.execute("SELECT * FROM ai_calls").fetchone()
+    a = conn.execute("SELECT * FROM news_analyses").fetchone()
+    assert call["outcome"].startswith("error") and a["ai_call_id"] == call["id"]
+    assert status(conn)["analysis_status"] == "failed"
+    if billed:
+        assert call["cost_usd"] == pytest.approx(worst) == pytest.approx(a["cost_usd"])
+        assert research.spent_today(conn, NOW) == pytest.approx(worst)
+        assert "worst-case cost" in call["outcome"]
+    else:
+        assert call["cost_usd"] == 0 and a["cost_usd"] == 0
+
+
+def test_a_timeout_through_the_loop_counts_against_the_daily_cap(conn):
+    """The reviewer's case: a timed-out call used to be recorded at $0, so the daily cap
+    never saw it. Now four timeouts at about $0.82 worst each leave no room for a fifth
+    (the daily cap is $5.00) instead of paying on for ever."""
+    for i in range(10):
+        add_news(conn, news_id=i + 1, created_at=PUBLISHED + timedelta(minutes=i))
+    client = FakeClient(error=TimeoutError("Request timed out."))
+    first = research.analyse_pending(conn, analyst(client), SETTINGS, NOW, None)
+    second = research.analyse_pending(conn, analyst(client), SETTINGS, NOW, None)
+    assert len(client.requests) == first["failed"] + second["failed"] < 10
+    assert second["over_budget"] > 0
+    assert research.spent_today(conn, NOW) <= SETTINGS.news_daily_cap_usd
+
+
+def test_the_news_analyst_has_its_own_client_without_retries_and_a_long_timeout(monkeypatch):
+    client = research.make_news_client("sk-test", AiSettings())
+    assert client.max_retries == 0 and client.timeout == 640.0           # 16,000 tokens at 25 a second
+    assert research.make_news_client("sk-test", AiSettings(news_max_tokens=32_000)).timeout == 1280.0
+    assert research.make_news_client("sk-test", AiSettings(news_max_tokens=2_000)).timeout == 600.0
+    made = []
+    monkeypatch.setattr(research, "make_news_client", lambda key, settings: made.append(key) or FakeClient())
+    monkeypatch.setattr(haiku, "make_client", lambda key: pytest.fail("the news analyst used Haiku's client"))
+    row = {"id": 1, "ours": ["AAPL"], "symbols": ["AAPL"], "created_at": PUBLISHED, "headline": "h"}
+    context = {"decided_at": NOW.isoformat(), "minutes_since_published": 30.0, "symbols": {}}
+    assert research.ClaudeAnalyst("sk-test", SETTINGS).analyse(row, context).error is None and made == ["sk-test"]
 
 
 def test_cost_counts_cache_tokens(conn):
@@ -322,14 +395,32 @@ def test_the_monthly_cap_stops_the_call_before_it_is_made(conn):
     assert st["analysis_status"] == "over_budget" and "monthly_cap_usd" in st["analysis_note"]
 
 
-def test_the_worst_case_is_the_prompt_plus_a_whole_answer(conn):
+def test_the_worst_case_is_the_prompt_plus_a_whole_answer_at_the_dearest_price(conn):
     row = add_news(conn)
     a = analyst(FakeClient())
     context = research.build_context(conn, row, NOW, None)
     req = a.request(row, context)
     prompt = haiku.tokens_of(research.SYSTEM, req["messages"][0]["content"],
                              json.dumps(req["output_config"]["format"]["schema"]))
-    assert a.worst_cost(row, context) == pytest.approx((prompt * 4 + 16000 * 20) / 1e6)
+    # Opus is $4/$20, but a refusal fallback may answer as claude-fable-5-1 at $10/$50.
+    assert a.worst_cost(row, context) == pytest.approx((prompt * 10 + 16000 * 50) / 1e6)
+    # A configured model dearer than every fallback sets the worst case itself.
+    dear = AiSettings(monthly_cap_usd=50.0, news_input_per_million=12.0, news_output_per_million=60.0)
+    assert analyst(FakeClient(), dear).worst_cost(row, context) == pytest.approx((prompt * 12 + 16000 * 60) / 1e6)
+
+
+@pytest.mark.parametrize("served", ["claude-opus-5-5", *research.FALLBACK_PRICES, "claude-mystery-9"])
+def test_no_model_that_may_answer_can_cost_more_than_the_worst_case(conn, served):
+    """The cap is checked at the worst case; a fallback answering a whole answer at its
+    own price must still fit in it, so a fallback can never take the spend past a cap."""
+    row = add_news(conn)
+    a = analyst(FakeClient())
+    context = research.build_context(conn, row, NOW, None)
+    req = a.request(row, context)
+    prompt = haiku.tokens_of(research.SYSTEM, req["messages"][0]["content"],
+                             json.dumps(req["output_config"]["format"]["schema"]))
+    p_in, p_out = research.prices_for(served, SETTINGS)
+    assert (prompt * p_in + SETTINGS.news_max_tokens * p_out) / 1e6 <= a.worst_cost(row, context) + 1e-12
 
 
 def test_a_replayed_article_over_the_monthly_cap_keeps_its_status(conn):
@@ -537,3 +628,99 @@ def test_on_a_pool_connection_each_article_commits_alone_and_a_claimed_one_is_sk
         other.rollback()
     assert status(conn, 1)["analysis_status"] == "pending" and status(conn, 2)["analysis_status"] == "analysed"
     assert conn.execute("SELECT count(*) AS n FROM ai_calls").fetchone()["n"] == 1
+
+
+# ------------------------------------------------------------------ a paid call is never lost
+
+
+def test_a_nul_in_the_answer_is_removed_and_the_call_paid_once(conn):
+    """The reviewer's case: a rationale with a NUL ("\\u0000" in Claude's JSON) used to make
+    the save fail after the call, rolling back the spend record and leaving the article
+    'pending' to be paid for again on every pass."""
+    add_news(conn, ours=("AAPL",))
+    answer = {"predictions": [dict(GOOD["predictions"][0], rationale="ok\u0000 fine")]}
+    raw_nul = '{"predictions": [{"symbol": "AAPL", "direction": "up", "expected_move_pct": 3.0, ' \
+              '"horizon_days": 2, "confidence": 0.7, "already_priced_in": false, "rationale": "raw\x00nul"}]}'
+    client = FakeClient(answer=answer)
+    for _ in range(3):
+        research.analyse_pending(conn, analyst(client), SETTINGS, NOW, None)
+    assert len(client.requests) == 1
+    assert conn.execute("SELECT count(*) AS n FROM ai_calls").fetchone()["n"] == 1
+    assert research.spent_today(conn, NOW) > 0
+    assert status(conn)["analysis_status"] == "analysed"
+    assert conn.execute("SELECT rationale FROM news_predictions").fetchone()["rationale"] == "ok fine"
+    assert conn.execute("SELECT raw FROM news_analyses").fetchone()["raw"]["predictions"][0]["rationale"] == "ok fine"
+    # A raw NUL byte in the text is removed before parsing too.
+    row2 = add_news(conn, news_id=2, ours=("AAPL",))
+    saved = run(conn, FakeClient(answer=raw_nul), row2)
+    assert [p["rationale"] for p in saved] == ["rawnul"]
+
+
+@pytest.mark.parametrize("autocommit", [True, False], ids=["autocommit", "pool-like"])
+def test_a_failed_save_keeps_the_spend_record_and_fails_the_article(conn, test_db_url, monkeypatch, autocommit):
+    """Even if the NUL guard is gone, the save fails in Postgres: the ai_calls row is
+    already committed, the article is 'failed' (not 'pending'), and later passes do not
+    pay again. Also on a connection that is not autocommit, like the loop's pool."""
+    import psycopg
+    from psycopg.rows import dict_row
+
+    monkeypatch.setattr(research, "_no_nul", lambda value: value)       # the first layer off
+    add_news(conn, ours=("AAPL",))
+    answer = {"predictions": [dict(GOOD["predictions"][0], rationale="ok\u0000")]}
+    client = FakeClient(answer=answer)
+    with psycopg.connect(test_db_url, row_factory=dict_row, autocommit=autocommit) as loop_conn:
+        for _ in range(3):
+            counts = research.analyse_pending(loop_conn, analyst(client), SETTINGS, NOW, None)
+            assert loop_conn.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
+        assert counts == {"analysed": 0, "failed": 0, "skipped": 0, "over_budget": 0, "predictions": 0}
+    assert len(client.requests) == 1                                     # paid once
+    call = conn.execute("SELECT * FROM ai_calls").fetchone()             # and recorded, seen from elsewhere
+    assert call["cost_usd"] == pytest.approx((3000 * 4 + 900 * 20) / 1e6) and call["feature"] == "news"
+    assert research.spent_today(conn, NOW) == pytest.approx(call["cost_usd"])
+    st = status(conn)
+    assert st["analysis_status"] == "failed" and st["analysis_note"].startswith("error: the answer could not be saved")
+    a = conn.execute("SELECT * FROM news_analyses").fetchone()
+    assert a["ai_call_id"] == call["id"] and a["error"] == st["analysis_note"] and a["cost_usd"] == call["cost_usd"]
+    assert conn.execute("SELECT count(*) AS n FROM news_predictions").fetchone()["n"] == 0
+
+
+def test_the_call_is_made_with_no_transaction_open_on_a_claimed_article(conn, test_db_url):
+    """During the call the article is already claimed (committed, no longer 'pending'), so
+    another loop cannot take it, and the loop's connection holds no transaction."""
+    import psycopg
+    from psycopg.rows import dict_row
+
+    add_news(conn, ours=("AAPL",))
+    seen = []
+    with psycopg.connect(test_db_url, row_factory=dict_row) as loop_conn:
+        class Watching(FakeClient):
+            def create(self, **kwargs):
+                seen.append((loop_conn.info.transaction_status, dict(status(conn)),
+                             research.analyse_pending(conn, analyst(FakeClient()), SETTINGS, NOW, None)))
+                return super().create(**kwargs)
+
+        research.analyse_pending(loop_conn, analyst(Watching(answer={"predictions": []})), SETTINGS, NOW, None)
+    (txn, during, other_loop), = seen
+    assert txn == psycopg.pq.TransactionStatus.IDLE
+    assert during["analysis_status"] == "failed" and "being analysed" in during["analysis_note"]
+    assert sum(other_loop.values()) == 0                                # the other loop found nothing to take
+    assert status(conn)["analysis_status"] == "analysed"
+
+
+def test_an_article_whose_call_never_finished_is_not_paid_for_again(conn):
+    """The process dies during the call (here: an exception no handler catches). The
+    article stays claimed as 'failed', never 'pending', so the next pass leaves it alone."""
+    add_news(conn, ours=("AAPL",))
+
+    class Dying(FakeClient):
+        def create(self, **kwargs):
+            super().create(**kwargs)
+            raise SystemExit("killed")
+
+    client = Dying()
+    with pytest.raises(SystemExit):
+        research.analyse_pending(conn, analyst(client), SETTINGS, NOW, None)
+    st = status(conn)
+    assert st["analysis_status"] == "failed" and "being analysed" in st["analysis_note"]
+    research.analyse_pending(conn, analyst(client), SETTINGS, NOW, None)
+    assert len(client.requests) == 1

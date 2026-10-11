@@ -60,11 +60,11 @@ class StubAnalyst:
                               error=self.error)
 
 
-def add(conn, news_id, created_at, status="backfill", ours=("AAPL",)):
+def add(conn, news_id, created_at, status="backfill", ours=("AAPL",), updated_at=None):
     conn.execute(
-        "INSERT INTO news (id, headline, summary, content, source, symbols, ours, created_at, analysis_status) "
-        "VALUES (%s, 'h', 's', 'c', 'test', %s, %s, %s, %s)",
-        (news_id, [s.replace("/", "") for s in ours], list(ours), created_at, status))
+        "INSERT INTO news (id, headline, summary, content, source, symbols, ours, created_at, updated_at, "
+        "analysis_status) VALUES (%s, 'h', 's', 'c', 'test', %s, %s, %s, %s, %s)",
+        (news_id, [s.replace("/", "") for s in ours], list(ours), created_at, updated_at, status))
 
 
 def add_window(conn, n, start=SINCE + timedelta(hours=9)):
@@ -190,6 +190,62 @@ def test_an_article_with_a_replay_analysis_is_not_sent_again_even_if_still_backf
     a = StubAnalyst()
     go(conn, a)
     assert [i for i, _ in a.calls] == [2]
+
+
+def test_an_article_edited_after_the_decision_time_is_skipped_and_counted(conn):
+    """Alpaca serves an article's latest text; one edited after the decision may already
+    report the price reaction, so it is not shown to Claude."""
+    t = SINCE + timedelta(hours=9)
+    add(conn, 1, t, updated_at=t + timedelta(hours=2))                              # edited later: skipped
+    add(conn, 2, t + timedelta(hours=1), updated_at=t + timedelta(hours=1, minutes=5))  # at the decision: kept
+    add(conn, 3, t + timedelta(hours=2), updated_at=t + timedelta(hours=2, seconds=30))  # a quick fix: kept
+    add(conn, 4, t + timedelta(hours=3))                                            # never edited: kept
+    a = StubAnalyst()
+    out = go(conn, a)
+    assert [i for i, _ in a.calls] == [2, 3, 4]
+    assert out["replayed"] == 3 and out["skipped"] == 1 and out["waiting"] == 4
+    assert "edited after the decision time" in out["skipped_why"]
+    assert "1 skipped (edited after the decision time" in out["lines"][-1]
+    assert count(conn, "SELECT count(*) AS n FROM news_analyses WHERE news_id = 1") == 0
+    assert count(conn, "SELECT count(*) AS n FROM ai_calls") == 3
+
+
+def test_skipped_articles_show_in_the_progress_lines(conn):
+    t = SINCE + timedelta(hours=9)
+    for i in range(12):
+        add(conn, i + 1, t + timedelta(hours=i), updated_at=t + timedelta(hours=i, minutes=30 if i < 2 else 0))
+    out = go(conn, StubAnalyst(cost=0.01, worst=0.02))
+    progress = [x for x in out["lines"] if x.startswith("replayed 8 of 12")]
+    assert len(progress) == 1 and "2 skipped (edited after the decision time" in progress[0]
+    assert out["replayed"] == 10 and out["skipped"] == 2
+
+
+def test_nothing_skipped_says_nothing_about_skipping(conn):
+    add_window(conn, 2)
+    out = go(conn, StubAnalyst())
+    assert out["skipped"] == 0 and out["skipped_why"] is None and "skipped" not in out["lines"][-1]
+
+
+def test_a_replayed_article_whose_save_fails_is_paid_once_and_never_sent_again(conn, monkeypatch):
+    """The spend record is committed before the save; a failed save leaves a failed
+    replay analysis, so the run counts the money and a second run does not pay again."""
+    import psycopg
+
+    def broken(*args, **kwargs):
+        raise psycopg.errors.DataError("PostgreSQL text fields cannot contain NUL (0x00) bytes")
+
+    monkeypatch.setattr(research, "_save_analysis", broken)
+    add_window(conn, 1)
+    a = StubAnalyst(cost=0.10, worst=0.30)
+    out = go(conn, a)
+    assert out["replayed"] == 1 and out["failed"] == 1 and out["cost"] == pytest.approx(0.10)
+    call = conn.execute("SELECT * FROM ai_calls").fetchone()
+    assert call["feature"] == "news_replay" and call["cost_usd"] == pytest.approx(0.10)
+    an = conn.execute("SELECT * FROM news_analyses").fetchone()
+    assert an["ai_call_id"] == call["id"] and an["error"].startswith("error: the answer could not be saved")
+    assert conn.execute("SELECT analysis_status FROM news").fetchone()["analysis_status"] == "failed"
+    again = go(conn, a)
+    assert again["replayed"] == 0 and len(a.calls) == 1
 
 
 def test_the_backfill_fetches_the_window_first(conn):
