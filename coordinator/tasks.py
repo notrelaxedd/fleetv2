@@ -76,7 +76,7 @@ def make_tasks(status: BrokerStatus, limits: Limits, bar_source: Any) -> tuple[C
             last_refresh[market] = now
             refresh_market(pool, bar_source, market)
 
-    return (broker_status, daily_loss, trade, score_news, fresh_prices)
+    return (broker_status, daily_loss, trade, fresh_prices, score_news)
 
 
 def make_news_tasks(news_source: Any, analyst: Any, settings: Any, bar_source: Any) -> tuple[Callable[[ConnectionPool], None], ...]:
