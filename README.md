@@ -555,9 +555,13 @@ What the simulator reports for a model, at each contract size it tries:
 ## Safety controls
 
 - **Pause all trading**: one button in the header. While paused no model places an
-  order. Backtests and model searches keep running. Resume trading is the same button.
+  order (except the news strategies' protective closes, below). Backtests and model searches keep running. Resume trading is the same button.
 - **Daily loss limit**: if the Alpaca account is down more than 2% on the day, all
-  trading pauses by itself and says why. Only you resume it.
+  trading pauses by itself and says why. Only you resume it. An order that only
+  reduces a position (a sale of at most the shares held, or buying back at most the
+  shares short) skips the loss check, since it can only lower risk. While paused, the
+  news strategies still close a position through its stop and close every position of
+  a strategy you stopped; nothing else goes out until you resume.
 - **Per-model limits** in `config/limits.toml`: starting balance 10,000, max per position
   1,000, max per model 10,000 (dollars). A worker cannot raise them. Edit the file, then
   `docker compose restart coordinator`. The daily loss percent and the temperature at
@@ -716,7 +720,9 @@ brilliant and prove nothing. The replay only uses news published after Claude's 
 cutoff plus a margin (`no_replay_before` in `config/limits.toml`, 2026-08-01). It shows
 Claude each such article as if it were live, five minutes after publication, with only
 the prices known by then, saves the predictions as "replay" and scores them like live
-ones (`coordinator/news_replay.py`). It spends real money, so run it by hand, as root in
+ones (`coordinator/news_replay.py`). An article edited after that decision time is
+skipped and counted as skipped, because Alpaca gives only an article's latest text, which
+may already tell of the price reaction. It spends real money, so run it by hand, as root in
 the coordinator container, first **without** `--yes` to see the window, how many
 articles are stored and a rough cost, then with it:
 

@@ -23,10 +23,28 @@ count, and nothing else:
   their horizon has passed.
 
 **Coin-flip twin.** Every prediction is scored next to a twin with the same entry and
-exit but a random direction (seeded by the prediction id, so it never changes). A
-market is tradeable only when its predictions beat the twin by more than two standard
-errors over at least `min_scored_predictions` scored predictions, and their own mean
-return after costs is positive.
+exit but a random direction (seeded by the prediction id, so it never changes).
+
+**The gate** (`coordinator/news_scoring.gate`) measures exactly what would be traded:
+
+- Only the calls the strategy would trade count: `news_scoring.would_trade`, the same
+  predicate news_trading's entries use (confidence >= `min_confidence`, not already
+  priced in, expected move >= `cost_multiple` x round-trip cost, never SPY or QQQ,
+  crypto "up" only).
+- Calls of one symbol, entry day and direction are averaged into one independent call
+  (nine articles making the same call on the same day are one observation, not nine);
+  `min_scored_predictions` counts these independent calls.
+- The edge is measured against the market: the call's move minus the benchmark's
+  (SPY, BTC/USD), signed by direction, against the twin's on the same bars and charged
+  the same costs. Riding the market's drift, or saving the borrow fee by never
+  shorting, earns no edge.
+- A replay answered by a different model than the one asked (a refusal fallback,
+  `news_analyses.served_model <> requested_model`) never counts: that model's training
+  cutoff may be later than the replayed news.
+
+A market is tradeable only when that edge is more than two standard errors above zero
+over at least `min_scored_predictions` independent calls, and the same calls' mean
+absolute return after costs (what the book would earn) is positive.
 
 **Entry and exit.** Entry is the open of the first bar that starts after the decision
 (stocks: daily bars, so the next session's open, pessimistic on purpose; crypto: the
@@ -78,7 +96,13 @@ book is short S the account's position in S is exactly that short.
   at Alpaca: fractional and crypto positions cannot all carry one, and a resting order
   would hold the book's "order in flight" lock forever. If box1 is down, stops are not
   watched; the daily loss limit is not either.)
-- Pause all trading and the 2% daily loss limit apply unchanged.
+- Pause all trading and the 2% daily loss limit apply, with one exception added after
+  the review (as the futures paper books already do): an order that only reduces a
+  position (selling at most what is held, covering at most what is short) skips the
+  daily loss check, since it can only lower risk; and while paused, a news book's
+  reducing order still goes out when it is protective: a stop-loss exit, or closing a
+  book the owner stopped. Without it a losing short could not be covered once the loss
+  limit tripped. Time exits, opposite-prediction exits and every opening order wait.
 - Paper only; real money uses the same steps as today.
 
 ## 5. Claude

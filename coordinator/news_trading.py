@@ -13,15 +13,19 @@ fills are never booked by two threads at once. For each news book, every pass:
 1. Book fills and move each news position along: opening -> open (with its entry
    price, stop and exit time) or failed (with the reason), closing -> closed (with its
    profit) or back to open when the close did not go through.
-2. Wait, as the models' executor does, while trading is paused, the coordinator is in
-   another mode, the stock market is closed (stock book) or an order is still filling.
-3. Exits first: the horizon has passed, the latest trade price is through the stop, or
+2. Wait, as the models' executor does, while the coordinator is in another mode, the
+   stock market is closed (stock book) or an order is still filling.
+3. Exits first: the latest trade price is through the stop, the horizon has passed, or
    a newer prediction expects the opposite move; a stopping book closes everything.
-4. Entries (active books only): fresh live predictions (decided in the last 30
-   minutes), confident enough, not already priced in, and expecting a move worth
-   cost_multiple round trips of costs. Up -> buy; down -> short (stocks, whole shares)
-   or nothing (crypto: Alpaca cannot short coins, and step 3 already sells a coin the
-   book holds). One position per symbol; at most max_trades_per_day new ones a day.
+   While trading is paused only the protective exits go out (a stop, or closing a book
+   the owner stopped: safety.approve_and_place lets those through the pause); the
+   others wait for the owner to resume.
+4. Entries (active books only, never while paused): fresh live predictions (decided
+   in the last 30 minutes), confident enough, not already priced in, and expecting a
+   move worth cost_multiple round trips of costs. Up -> buy; down -> short (stocks,
+   whole shares) or nothing (crypto: Alpaca cannot short coins, and step 3 already
+   sells a coin the book holds). One position per symbol; at most max_trades_per_day
+   new ones a day.
 
 Stops are watched here against Alpaca's latest trade price (no resting stop order at
 Alpaca): if the coordinator is down, stops are not watched.
@@ -233,14 +237,15 @@ def _sync(conn: psycopg.Connection, book: dict[str, Any], limits: Limits, now: d
             if order_id is None:
                 # A crash between the position row and the order: adopt the order if it
                 # was written (it belongs to no position yet), else the order was never sent.
+                # Only an order written after the position was can be its order.
                 orphan = conn.execute(
                     """
-                    SELECT id FROM orders o WHERE o.book_id = %s AND o.symbol = %s
+                    SELECT id FROM orders o WHERE o.book_id = %s AND o.symbol = %s AND o.created_at >= %s
                        AND NOT EXISTS (SELECT 1 FROM news_positions x WHERE x.open_order_id = o.id
                                                                          OR x.close_order_id = o.id)
                      ORDER BY o.created_at DESC LIMIT 1
                     """,
-                    (book["id"], np["symbol"]),
+                    (book["id"], np["symbol"], np["opened_at"]),
                 ).fetchone()
                 if orphan is None:
                     _fail(conn, np["id"], "the coordinator stopped before the order was sent", now)
@@ -310,14 +315,16 @@ def _book_pass(conn: psycopg.Connection, status: BrokerStatus, limits: Limits, p
     _sync(conn, book, limits, now)
     if _in_flight(conn, book["id"]):
         return 0  # wait for the last order to settle before deciding again
-    if safety.is_paused(conn):
-        trading._set_waiting(conn, book["id"], "Waiting: trading is paused")
-        return 0
+    # While paused the stops and a stopped book's closing still go out (protective exits);
+    # nothing else does.
+    paused = safety.is_paused(conn)
+    wait = None
     if book["mode"] != status.broker.mode:
-        trading._set_waiting(conn, book["id"], f"Waiting: the coordinator is in {status.broker.mode} mode")
-        return 0
-    if book["market"] == "stocks" and not (status.clock_info and status.clock_info.is_open):
-        trading._set_waiting(conn, book["id"], "Waiting for the stock market to open")
+        wait = f"Waiting: the coordinator is in {status.broker.mode} mode"
+    elif book["market"] == "stocks" and not (status.clock_info and status.clock_info.is_open):
+        wait = "Waiting for the stock market to open"
+    if wait is not None:
+        trading._set_waiting(conn, book["id"], "Waiting: trading is paused" if paused else wait)
         return 0
 
     open_rows = conn.execute(
@@ -328,7 +335,7 @@ def _book_pass(conn: psycopg.Connection, status: BrokerStatus, limits: Limits, p
         """,
         (book["id"],),
     ).fetchall()
-    candidates = _candidates(conn, book, limits, now) if book["status"] == "active" else []
+    candidates = _candidates(conn, book, limits, now) if book["status"] == "active" and not paused else []
     held_symbols = [r["symbol"] for r in conn.execute("SELECT symbol FROM positions WHERE book_id = %s",
                                                        (book["id"],)).fetchall()]
     live = _safe_prices(price_now, [r["symbol"] for r in open_rows] + [c["symbol"] for c in candidates] + held_symbols)
@@ -337,7 +344,7 @@ def _book_pass(conn: psycopg.Connection, status: BrokerStatus, limits: Limits, p
     prices.update(live)
 
     sent, note = 0, None
-    result = _exits(conn, status, limits, book, open_rows, live, prices, now)
+    result = _exits(conn, status, limits, book, open_rows, live, prices, now, protective_only=paused)
     sent += result[0]
     if result[1] is not None:
         trading._set_waiting(conn, book["id"], "Waiting: " + result[1])
@@ -349,6 +356,9 @@ def _book_pass(conn: psycopg.Connection, status: BrokerStatus, limits: Limits, p
             conn.commit()
             return sent
         trading._set_waiting(conn, book["id"], note or "Stopping: closing its positions")
+        return sent
+    if paused:
+        trading._set_waiting(conn, book["id"], "Waiting: trading is paused")
         return sent
     entered, halted, entry_note = _entries(conn, status, limits, book, candidates, live, prices, now)
     sent += entered
@@ -376,19 +386,21 @@ def _place(conn: psycopg.Connection, status: BrokerStatus, limits: Limits, book:
 
 
 def _exit_reason(conn: psycopg.Connection, limits: Limits, book: dict[str, Any], np: dict[str, Any],
-                 live: dict[str, float], now: datetime) -> str | None:
-    """Why an open position should be closed now, in plain words, or None."""
+                 live: dict[str, float], now: datetime) -> tuple[str, bool] | None:
+    """(why an open position should be closed now, in plain words, whether the exit is
+    protective: a stop, or the book was stopped), or None. Protective exits go out even
+    while trading is paused, so the stop is checked before the horizon."""
     if book["status"] == "closing":
-        return "the news strategy was stopped"
-    days = np["horizon_days"]
-    if np["exit_due_at"] is not None and np["exit_due_at"] <= now:
-        return f"its {days}-day horizon has passed"
+        return "the news strategy was stopped", True
     price = live.get(np["symbol"])
     if price is not None and np["stop_price"] is not None:
         if np["side"] == "long" and price <= np["stop_price"]:
-            return f"the price fell to {price:,.2f}, through its stop at {np['stop_price']:,.2f}"
+            return f"the price fell to {price:,.2f}, through its stop at {np['stop_price']:,.2f}", True
         if np["side"] == "short" and price >= np["stop_price"]:
-            return f"the price rose to {price:,.2f}, through its stop at {np['stop_price']:,.2f}"
+            return f"the price rose to {price:,.2f}, through its stop at {np['stop_price']:,.2f}", True
+    days = np["horizon_days"]
+    if np["exit_due_at"] is not None and np["exit_due_at"] <= now:
+        return f"its {days}-day horizon has passed", False
     against = "down" if np["side"] == "long" else "up"
     newer = conn.execute(
         """
@@ -402,20 +414,21 @@ def _exit_reason(conn: psycopg.Connection, limits: Limits, book: dict[str, Any],
     if newer is not None:
         verb = "fall" if against == "down" else "rise"
         return (f"a newer prediction expects it to {verb} {newer['expected_move_pct']:.1f}% "
-                f"(confidence {newer['confidence']:.2f})")
+                f"(confidence {newer['confidence']:.2f})"), False
     return None
 
 
 def _exits(conn: psycopg.Connection, status: BrokerStatus, limits: Limits, book: dict[str, Any],
            open_rows: list[dict[str, Any]], live: dict[str, float], prices: dict[str, float],
-           now: datetime) -> tuple[int, str | None, str | None]:
-    """Close what is due. Returns (orders sent, why the book must wait, a note)."""
+           now: datetime, protective_only: bool = False) -> tuple[int, str | None, str | None]:
+    """Close what is due (only the protective exits when `protective_only`, i.e. while
+    trading is paused). Returns (orders sent, why the book must wait, a note)."""
     sent, note = 0, None
-    todo: list[tuple[dict[str, Any] | None, str, str]] = []  # (position, symbol, reason)
+    todo: list[tuple[dict[str, Any] | None, str, str, bool]] = []  # (position, symbol, reason, protective)
     for np in open_rows:
-        reason = _exit_reason(conn, limits, book, np, live, now)
-        if reason:
-            todo.append((np, np["symbol"], reason))
+        why = _exit_reason(conn, limits, book, np, live, now)
+        if why is not None and (why[1] or not protective_only):
+            todo.append((np, np["symbol"], *why))
     if book["status"] == "closing":
         # Anything the book holds that no news position accounts for is closed too, so a
         # stopped book always ends flat.
@@ -425,8 +438,8 @@ def _exits(conn: psycopg.Connection, status: BrokerStatus, limits: Limits, book:
         for r in conn.execute("SELECT symbol FROM positions WHERE book_id = %s AND qty <> 0 ORDER BY symbol",
                               (book["id"],)).fetchall():
             if r["symbol"] not in tracked:
-                todo.append((None, r["symbol"], "the news strategy was stopped"))
-    for np, symbol, reason in todo:
+                todo.append((None, r["symbol"], "the news strategy was stopped", True))
+    for np, symbol, reason, protective in todo:
         if np is not None and np["close_order_id"] is not None and conn.execute(
                 "SELECT 1 FROM orders WHERE id = %s AND status = 'rejected'"
                 " AND finished_at > now() - make_interval(secs => %s)",
@@ -443,6 +456,8 @@ def _exits(conn: psycopg.Connection, status: BrokerStatus, limits: Limits, book:
         side_word = "long" if held > 0 else "short"
         order = {"symbol": symbol, "side": "sell" if held > 0 else "buy", "qty": abs(held),
                  "reason": f"News: closing the {symbol} {side_word} because {reason}"}
+        if protective:
+            order["protective"] = True  # may go out while paused (safety.approve_and_place)
         row = _place(conn, status, limits, book, order, prices)
         sent += row["status"] != "blocked"
         if np is not None:
@@ -485,18 +500,11 @@ def _candidates(conn: psycopg.Connection, book: dict[str, Any], limits: Limits, 
 
 
 def _skip_reason(p: dict[str, Any], market: str, limits: Limits) -> str | None:
-    """Why a prediction is not traded at all, or None."""
-    if p["symbol"] in NEWS_EXCLUDED:
-        return "SPY and QQQ are left to the futures paper books"
-    if p["direction"] not in ("up", "down"):
-        return "no direction"
-    if p["confidence"] < limits.min_confidence:
-        return "not confident enough"
-    if p["already_priced_in"]:
-        return "already priced in"
-    if p["expected_move_pct"] < limits.cost_multiple * round_trip_cost_pct(market):
-        return "too small a move to beat the costs"
-    return None
+    """Why a prediction is not traded at all, or None. The very predicate the gate counts
+    by (news_scoring.skip_reason), so the gate measures exactly what is traded."""
+    from coordinator import news_scoring
+
+    return news_scoring.skip_reason(p, market, limits)
 
 
 def _entry_reason(p: dict[str, Any]) -> str:

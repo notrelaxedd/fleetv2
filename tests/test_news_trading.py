@@ -431,3 +431,128 @@ def test_everything_is_committed_on_a_pooled_connection(env, test_db_url):
         c.rollback()  # anything left uncommitted would be lost here
     assert [p["status"] for p in positions(env)] == ["closed", "closed"]
     assert book(env)["status"] == "closed"
+
+
+# ------------------------------------------------------------------ the daily loss limit and the pause
+
+
+def test_the_daily_loss_limit_never_traps_a_short(env):
+    """A cover only reduces risk: it skips the daily loss check, so a short through its
+    stop is closed even with the account down past the limit (it used to be blocked,
+    pause trading, and be blocked again after every resume)."""
+    start(env)
+    predict(env, "MSFT", "down")
+    run(env)
+    assert held(env, "MSFT") == -2.0
+    env.broker.equity = 97_000.0  # the account is down 3% today
+    env.status.refresh(force=True)
+    env.prices["MSFT"] = 260.0    # far through its stop at 209.9
+    assert run(env) == 1
+    assert held(env, "MSFT") == 0
+    cover = orders(env)[-1]
+    assert cover["side"] == "buy" and cover["status"] == "filled"
+    (np,) = positions(env)
+    assert np["status"] == "closed" and np["close_reason"].startswith("the price rose to 260.00")
+    # an opening order still meets the limit, and pauses trading
+    predict(env, "KO", "up")
+    assert run(env) == 0
+    assert safety.is_paused(env.conn) and held(env, "KO") == 0
+
+
+def test_while_paused_only_stops_go_out(env):
+    start(env)
+    predict(env, "AAPL", "up", ago_min=20)
+    predict(env, "MSFT", "down", ago_min=20)
+    predict(env, "JPM", "up", ago_min=20)
+    run(env)
+    assert held(env, "AAPL") > 0 and held(env, "MSFT") < 0 and held(env, "JPM") > 0
+    env.broker.equity = 97_000.0
+    env.status.refresh(force=True)
+    safety.check_daily_loss(env.conn, env.status, LIMITS)  # the loop's own check pauses trading
+    assert safety.is_paused(env.conn)
+    b = book(env)
+    env.conn.execute("UPDATE news_positions SET exit_due_at = %s WHERE symbol = 'AAPL'",
+                     (env.now - timedelta(minutes=1),))                      # its horizon has passed
+    predict(env, "JPM", "down", move=4.0, ago_min=2)                         # a newer opposite prediction
+    predict(env, "KO", "up", ago_min=1)                                      # a fresh entry
+    env.prices["MSFT"] = 211.0                                               # through its stop at 209.9
+    before = len(orders(env))
+    assert run(env) == 1  # only the stop
+    new = orders(env)[before:]
+    assert [(o["symbol"], o["side"], o["status"]) for o in new] == [("MSFT", "buy", "filled")]
+    assert held(env, "MSFT") == 0 and held(env, "AAPL") > 0 and held(env, "JPM") > 0 and held(env, "KO") == 0
+    assert {p["symbol"]: p["status"] for p in positions(env)} == {"AAPL": "open", "MSFT": "closed", "JPM": "open"}
+    assert book(env)["waiting"] == "Waiting: trading is paused"
+    assert safety.is_paused(env.conn)
+    # a long through its stop goes out too
+    env.prices["JPM"] = 140.0
+    assert run(env) == 1 and held(env, "JPM") == 0
+    jpm = [p for p in positions(env) if p["symbol"] == "JPM"][0]
+    assert jpm["close_reason"].startswith("the price fell to 140.00")
+    # after the owner resumes, the time exit and the entries (KO, and the JPM short its
+    # newer prediction calls for) go out
+    env.broker.equity = 100_000.0
+    env.status.refresh(force=True)
+    safety.resume_trading(env.conn, "owner")
+    assert run(env) == 3
+    assert held(env, "AAPL") == 0 and held(env, "KO") > 0 and held(env, "JPM") < 0
+    assert book(env)["id"] == b["id"]
+
+
+def test_a_stopped_book_closes_while_paused(env):
+    start(env)
+    predict(env, "AAPL", "up")
+    predict(env, "MSFT", "down")
+    run(env)
+    env.broker.equity = 97_000.0
+    env.status.refresh(force=True)
+    safety.check_daily_loss(env.conn, env.status, LIMITS)
+    news_trading.stop(env.conn, "stocks")
+    assert run(env) == 2
+    assert held(env, "AAPL") == 0 and held(env, "MSFT") == 0
+    assert {p["status"] for p in positions(env)} == {"closed"}
+    assert book(env)["status"] == "closed"
+    assert safety.is_paused(env.conn)
+
+
+def test_a_paused_crypto_book_still_watches_its_stops(env):
+    start(env, "crypto")
+    predict(env, "BTC/USD", "up")
+    run(env)
+    assert held(env, "BTC/USD") > 0
+    safety.pause_trading(env.conn, "owner", "Paused by you")
+    env.prices["BTC/USD"] = 50_000.0
+    assert run(env) == 1 and held(env, "BTC/USD") == 0
+
+
+# ------------------------------------------------------------------ crash recovery
+
+
+def test_crash_recovery_never_adopts_an_older_order(env):
+    b = start(env)
+    old = env.conn.execute(
+        "INSERT INTO orders (book_id, model_id, mode, symbol, side, notional, reason, status, created_at)"
+        " VALUES (%s, 'news-stocks', 'paper', 'AAPL', 'buy', 500, 'an old order', 'rejected', %s) RETURNING id",
+        (b["id"], env.now - timedelta(hours=1))).fetchone()
+    p = predict(env, "AAPL", "up", ago_min=40)  # too old to be traded again
+    env.conn.execute("INSERT INTO news_positions (book_id, prediction_id, symbol, side, opened_at)"
+                     " VALUES (%s, %s, 'AAPL', 'long', %s)", (b["id"], p["id"], env.now - timedelta(minutes=1)))
+    run(env)
+    (np,) = positions(env)
+    assert np["open_order_id"] is None and np["open_order_id"] != old["id"]
+    assert np["status"] == "failed" and np["close_reason"] == "the coordinator stopped before the order was sent"
+
+
+def test_crash_recovery_adopts_the_positions_own_order(env):
+    b = start(env)
+    p = predict(env, "AAPL", "up", ago_min=40)
+    env.conn.execute("INSERT INTO news_positions (book_id, prediction_id, symbol, side, opened_at)"
+                     " VALUES (%s, %s, 'AAPL', 'long', %s)", (b["id"], p["id"], env.now - timedelta(minutes=1)))
+    own = env.conn.execute(
+        "INSERT INTO orders (book_id, model_id, mode, symbol, side, notional, reason, status, error, created_at)"
+        " VALUES (%s, 'news-stocks', 'paper', 'AAPL', 'buy', 500, 'its order', 'rejected', 'Alpaca said no', %s)"
+        " RETURNING id", (b["id"], env.now)).fetchone()
+    run(env)
+    (np,) = positions(env)
+    assert np["open_order_id"] == own["id"]
+    assert np["status"] == "failed" and np["close_reason"] == "Alpaca said no"

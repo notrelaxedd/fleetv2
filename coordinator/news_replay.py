@@ -153,6 +153,9 @@ def _run(conn: psycopg.Connection, news_source: Any, analyst: Any, settings: AiS
         row = conn.execute("SELECT * FROM news WHERE id = %s", (news_id,)).fetchone()
         decided_at = row["created_at"] + REPLAY_DELAY
         if row["updated_at"] is not None and row["updated_at"] > decided_at:
+            # Marked once, so later runs and the dry run's count leave it out.
+            conn.execute("UPDATE news SET analysis_status = 'skipped', analysis_note = %s WHERE id = %s",
+                         (EDITED_REASON, news_id))
             out["skipped"] += 1
             out["skipped_why"] = EDITED_REASON
             continue

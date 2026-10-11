@@ -30,6 +30,7 @@ CAP_WARN = 0.8  # amber from this share of a spending cap
 ANALYSIS_TEXT = {
     "pending": "Waiting for Claude",
     "backfill": "Saved for replay only",
+    "analysing": "Claude is reading it",
     "analysed": "Read by Claude",
     "skipped": "Skipped",
     "failed": "Claude could not read it",
@@ -147,12 +148,16 @@ def _score_cards(s: dict[str, Any], market: str) -> list[dict[str, Any]]:
          "note": ""},
         {"key": "edge", "label": "Edge over the coin flip", "value": edge_text,
          "tone": "gain" if s["beats_twin"] else "plain",
-         "description": "Claude's average minus the twin's, plus or minus the wobble luck alone would cause. "
+         "description": f"Claude's result minus the twin's, both measured against {MARKET_BENCH[market]} so "
+                        "riding the market earns nothing, plus or minus the wobble luck alone would cause. "
                         "It is real only when it is more than twice the wobble.",
          "note": "Beats the twin." if s["beats_twin"] else ""},
         {"key": "scored", "label": "Predictions scored", "value": f"{n:,}", "tone": "plain",
          "description": "Checked against what the price really did.",
-         "note": f"{s['pending']:,} waiting for their time to pass · {s['none_count']:,} where Claude saw nothing to trade"},
+         "note": f"{s['pending']:,} waiting for their time to pass · {s['none_count']:,} where Claude saw nothing to trade"
+                 + (f" · {s['fallback_excluded']:,} replay{'s' if s['fallback_excluded'] != 1 else ''} left out"
+                    " (answered by a fallback model)"
+                    if s.get("fallback_excluded") else "")},
     ]
 
 
@@ -175,10 +180,21 @@ def scores(conn: psycopg.Connection, limits: Any) -> list[dict[str, Any]]:
         replay = news_scoring.stats(conn, market=market, source="replay")["n"]
         out.append({"market": market, "name": MARKET_NAME[market], "cards": _score_cards(s, market),
                     "gate_ok": ok, "gate_reason": reason, "live": live, "replay": replay, "detail": _detail_rows(s),
-                    # The gate counts only the calls the strategy would trade, so its numbers
-                    # can differ from the cards below, which count every call.
-                    "gate_basis": f"Counted on the calls it would trade: confidence {limits.min_confidence:g} or more."})
+                    # The gate counts only the calls the strategy would trade, one per symbol
+                    # and day, so its numbers can differ from the cards below, which count
+                    # every call.
+                    "gate_basis": gate_basis(market, limits)})
     return out
+
+
+def gate_basis(market: str, limits: Any) -> str:
+    """What the gate line counts, in plain words (news_scoring.gate and would_trade)."""
+    cost = news_scoring.round_trip_cost_pct(market)
+    which = "never SPY or QQQ" if market == "stocks" else "rises only, since coins cannot be shorted"
+    return (f"Counted on the calls it would trade (confidence {limits.min_confidence:g} or more, not already "
+            f"priced in, an expected move of at least {limits.cost_multiple:g} times the {cost:.2f}% round-trip "
+            f"cost, {which}), one per symbol and day, against {MARKET_BENCH[market]}. Replays answered by a "
+            "different model than the one asked never count.")
 
 
 # ------------------------------------------------------------------ paper trading

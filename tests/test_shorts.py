@@ -8,7 +8,7 @@ from dataclasses import replace
 import pytest
 
 from coordinator import models, news_trading, safety, trading
-from coordinator.broker import AlpacaBroker, AssetInfo, BrokerStatus, BrokerUnavailable, FakeBroker, NoBroker
+from coordinator.broker import AlpacaBroker, AssetInfo, BrokerStatus, BrokerUnavailable, FakeBroker, NoBroker, OrderState
 from coordinator.data import FakeBarSource
 from coordinator.errors import BadRequest, Conflict
 from coordinator.limits import Limits
@@ -312,3 +312,147 @@ def test_the_fake_bar_source_gives_latest_prices():
     prices = source.latest_prices(["AAPL", "BTC/USD"])
     assert set(prices) == {"AAPL", "BTC/USD"} and all(p > 0 for p in prices.values())
     assert source.latest_prices([]) == {}
+
+
+# ------------------------------------------------------------------ reducing orders and the daily loss limit
+
+
+def _down_3pct(env) -> None:
+    env.broker.equity, env.broker.last_equity = 97_000.0, 100_000.0
+    env.status.refresh(force=True)
+
+
+def test_an_order_that_only_reduces_skips_the_daily_loss_check(env):
+    place(env, env.news, symbol="AAPL", side="sell", qty=3.0)
+    place(env, env.news, symbol="MSFT", side="buy", notional=400.0)
+    place(env, env.plain, symbol="KO", side="buy", notional=300.0)
+    _down_3pct(env)
+    # covering part of a short, selling part of a long (any book): they go out and do not pause
+    assert place(env, env.news, symbol="AAPL", side="buy", qty=2.0)["status"] == "filled"
+    assert place(env, env.news, symbol="MSFT", side="sell", qty=1.0)["status"] == "filled"
+    assert place(env, env.plain, symbol="KO", side="sell", qty=1.0)["status"] == "filled"
+    assert not safety.is_paused(env.conn)
+    # more than the short is not reducing: the loss check applies (and pauses)
+    row = place(env, env.news, symbol="AAPL", side="buy", qty=2.0)
+    assert row["status"] == "blocked" and row["error"].startswith("Daily loss limit reached")
+    assert safety.is_paused(env.conn)
+
+
+def test_opening_orders_still_meet_the_daily_loss_limit(env):
+    _down_3pct(env)
+    for book, order in ((env.news, {"symbol": "AAPL", "side": "sell", "qty": 1.0}),
+                        (env.news, {"symbol": "MSFT", "side": "buy", "notional": 100.0}),
+                        (env.plain, {"symbol": "KO", "side": "buy", "notional": 100.0})):
+        safety.resume_trading(env.conn, "owner")
+        row = place(env, book, **order)
+        assert row["status"] == "blocked" and row["error"].startswith("Daily loss limit reached")
+
+
+def test_while_paused_only_a_protective_reducing_order_of_a_news_book_goes_out(env):
+    place(env, env.news, symbol="AAPL", side="sell", qty=3.0)
+    place(env, env.news, symbol="MSFT", side="buy", notional=400.0)
+    place(env, env.plain, symbol="KO", side="buy", notional=300.0)
+    _down_3pct(env)
+    safety.check_daily_loss(env.conn, env.status, LIMITS)
+    assert safety.is_paused(env.conn)
+    blocked = [
+        (env.news, {"symbol": "AAPL", "side": "buy", "qty": 1.0}),                          # not protective
+        (env.news, {"symbol": "KO", "side": "sell", "qty": 1.0, "protective": True}),       # opens a short
+        (env.news, {"symbol": "AAPL", "side": "buy", "qty": 4.0, "protective": True}),      # more than the short
+        (env.news, {"symbol": "KO", "side": "buy", "notional": 100.0, "protective": True}),  # opens a long
+        (env.plain, {"symbol": "KO", "side": "sell", "qty": 1.0, "protective": True}),      # not a news book
+    ]
+    for book, order in blocked:
+        row = place(env, book, **order)
+        assert row["status"] == "blocked" and row["error"] == safety.PAUSED, order
+    assert place(env, env.news, symbol="AAPL", side="buy", qty=3.0, protective=True)["status"] == "filled"
+    assert place(env, env.news, symbol="MSFT", side="sell", qty=1.0, protective=True)["status"] == "filled"
+    assert held(env, env.news, "AAPL") is None
+    assert safety.is_paused(env.conn)  # still paused: only the owner resumes
+
+
+def test_a_protective_order_still_needs_the_right_mode_and_an_open_market(env):
+    place(env, env.news, symbol="AAPL", side="sell", qty=3.0)
+    safety.pause_trading(env.conn, "owner", "Paused by you")
+    env.broker.is_open = False
+    env.status.refresh(force=True)
+    row = place(env, env.news, symbol="AAPL", side="buy", qty=3.0, protective=True)
+    assert row["status"] == "blocked" and row["error"] == safety.MARKET_CLOSED
+    env.broker.is_open = True
+    env.status.refresh(force=True)
+    env.conn.execute("UPDATE books SET mode = 'live' WHERE id = %s", (env.news["id"],))
+    row = place(env, env.news, symbol="AAPL", side="buy", qty=3.0, protective=True)
+    assert row["status"] == "blocked" and "coordinator is in paper mode" in row["error"]
+    assert held(env, env.news, "AAPL")["qty"] == pytest.approx(-3.0)
+
+
+# ------------------------------------------------------------------ partial fills
+
+
+def _submitted(env, book: dict, model_id: str, symbol: str, side: str, qty: float | None = None,
+               notional: float | None = None) -> str:
+    row = env.conn.execute(
+        "INSERT INTO orders (book_id, model_id, mode, symbol, side, qty, notional, reason, status)"
+        " VALUES (%s, %s, 'paper', %s, %s, %s, %s, 't', 'submitted') RETURNING id",
+        (book["id"], model_id, symbol, side, qty, notional)).fetchone()
+    return str(row["id"])
+
+
+def _fills(env, order_id: str, *states: OrderState) -> None:
+    """Alpaca reports each state in turn (filled_avg_price is over the whole order so far)."""
+    for state in states:
+        env.broker._orders = {order_id: state}
+        trading.poll_fills(env.conn, env.status)
+
+
+def test_partial_fills_of_a_buy_are_booked_at_each_increments_own_price(env):
+    oid = _submitted(env, env.plain, "plain", "AAPL", "buy", notional=530.0)
+    # 2 at 100, then 3 more at 110: Alpaca's average over the order is 106
+    _fills(env, oid, OrderState("partially_filled", 2.0, 100.0), OrderState("filled", 5.0, 106.0))
+    pos = held(env, env.plain, "AAPL")
+    assert pos["qty"] == pytest.approx(5.0) and pos["cost"] == pytest.approx(530.0)
+    assert cash(env, env.plain) == pytest.approx(10_000 - 530.0)
+    row = env.conn.execute("SELECT booked_qty, filled_avg_price FROM orders WHERE id = %s", (oid,)).fetchone()
+    assert row["booked_qty"] == pytest.approx(5.0) and row["filled_avg_price"] == pytest.approx(106.0)
+
+
+def test_partial_fills_of_a_sale_of_a_long(env):
+    env.conn.execute("INSERT INTO positions (book_id, symbol, qty, cost) VALUES (%s, 'AAPL', 6, 600)", (env.plain["id"],))
+    oid = _submitted(env, env.plain, "plain", "AAPL", "sell", qty=5.0)
+    # 2 at 100, a poll with nothing new, then 3 more at 94 (average 96.4)
+    _fills(env, oid, OrderState("partially_filled", 2.0, 100.0), OrderState("partially_filled", 2.0, 100.0),
+           OrderState("filled", 5.0, 96.4))
+    assert cash(env, env.plain) == pytest.approx(10_000 + 2 * 100.0 + 3 * 94.0)
+    pos = held(env, env.plain, "AAPL")
+    assert pos["qty"] == pytest.approx(1.0) and pos["cost"] == pytest.approx(100.0)
+
+
+def test_partial_fills_of_a_short_and_of_its_cover(env):
+    oid = _submitted(env, env.news, "news-stocks", "AAPL", "sell", qty=5.0)
+    # short 2 at 100, then 3 more at 95 (average 97)
+    _fills(env, oid, OrderState("partially_filled", 2.0, 100.0), OrderState("filled", 5.0, 97.0))
+    pos = held(env, env.news, "AAPL")
+    assert pos["qty"] == pytest.approx(-5.0) and pos["cost"] == pytest.approx(-(200.0 + 285.0))
+    assert cash(env, env.news) == pytest.approx(10_000 + 485.0)
+    cover = _submitted(env, env.news, "news-stocks", "AAPL", "buy", qty=5.0)
+    # cover 1 at 90, then 4 more at 92.5 (average 92)
+    _fills(env, cover, OrderState("partially_filled", 1.0, 90.0), OrderState("filled", 5.0, 92.0))
+    assert held(env, env.news, "AAPL") is None
+    assert cash(env, env.news) == pytest.approx(10_000 + 485.0 - 90.0 - 4 * 92.5)
+
+
+def test_a_book_that_is_not_a_news_strategy_never_books_a_short(env, caplog):
+    """Alpaca filled more than the book held (say, a sale planned again after a lost
+    answer): only what was held is booked, and a warning is logged."""
+    env.conn.execute("INSERT INTO positions (book_id, symbol, qty, cost) VALUES (%s, 'AAPL', 2, 200)", (env.plain["id"],))
+    oid = _submitted(env, env.plain, "plain", "AAPL", "sell", qty=2.0)
+    with caplog.at_level("WARNING", logger="coordinator.trading"):
+        _fills(env, oid, OrderState("filled", 5.0, 100.0))
+    assert held(env, env.plain, "AAPL") is None
+    assert env.conn.execute("SELECT count(*) AS n FROM positions WHERE qty < 0").fetchone()["n"] == 0
+    assert cash(env, env.plain) == pytest.approx(10_000 + 200.0)
+    assert "only news strategies short" in caplog.text
+    # nothing held at all: nothing booked
+    oid = _submitted(env, env.plain, "plain", "KO", "sell", qty=1.0)
+    _fills(env, oid, OrderState("filled", 1.0, 50.0))
+    assert held(env, env.plain, "KO") is None and cash(env, env.plain) == pytest.approx(10_000 + 200.0)

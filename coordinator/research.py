@@ -26,7 +26,7 @@ what was known when it decided, and that nothing it answers is trusted unchecked
   and "news_replay" for replayed ones. Problems (a refused key, a busy server, a
   refusal, a cut-off answer) become a failed analysis, never a crash.
 - A paid call is never lost and never repeated. The live loop claims an article (marks
-  it "failed: being analysed", committed) before the call, so it can never go back to
+  it "analysing", committed) before the call, so it can never go back to
   "pending" and be paid for again, however the rest goes. No transaction is open during
   the call. The ai_calls row is committed on its own as soon as the call returns, before
   the answer is saved, so a failure while saving cannot take the spend record with it;
@@ -77,8 +77,12 @@ FAKE_MODEL = "fake-analyst"
 NEWS_MAX_RETRIES = 0
 NEWS_MIN_TIMEOUT_S = 600.0
 NEWS_MIN_TOKENS_PER_S = 25.0
-CLAIM_NOTE = ("being analysed since {at:%Y-%m-%d %H:%M} UTC; if this stays, the analysis stopped halfway "
-              "(Claude may have been paid) and it is not tried again")
+CLAIM_NOTE = "being analysed since {at:%Y-%m-%d %H:%M} UTC"
+# An article still "analysing" this long after its claim was left by a crash (the call's
+# own timeout is about 11 minutes): it becomes "failed" and is not tried again, since
+# Claude may have been paid.
+STALE_CLAIM = timedelta(minutes=30)
+STALE_NOTE = "the analysis stopped halfway (the coordinator stopped?); Claude may have been paid, so it is not tried again"
 
 # US dollars per million tokens (in, out) for the models a refusal fallback may answer
 # with. The configured model uses the prices in config/ai.toml; a model in neither place
@@ -815,8 +819,8 @@ def analyse_pending(conn: psycopg.Connection, analyst: Any, settings: AiSettings
     """One bounded step: the oldest waiting articles (at most MAX_PER_STEP). Too old ->
     skipped; over a cap -> over_budget (final: by tomorrow the news is stale).
 
-    Each article is claimed with FOR UPDATE SKIP LOCKED and marked "failed" (with a
-    "being analysed" note) in a transaction committed before the call, so two loops
+    Each article is claimed with FOR UPDATE SKIP LOCKED and marked "analysing" in a
+    transaction committed before the call, so two loops
     never take the same article and, whatever happens during or after the call (even
     the process dying), an article that may have been paid for never goes back to
     "pending" to be paid for again. analyse_article then sets its final status. The
@@ -826,6 +830,10 @@ def analyse_pending(conn: psycopg.Connection, analyst: Any, settings: AiSettings
     if not analyst.connected or not settings.news_enabled:
         return counts
     oldest = now - timedelta(hours=settings.news_max_article_age_hours)
+    _no_open_transaction(conn)
+    with conn.transaction():
+        conn.execute("UPDATE news SET analysis_status = 'failed', analysis_note = %s"
+                     " WHERE analysis_status = 'analysing' AND claimed_at < %s", (STALE_NOTE, now - STALE_CLAIM))
     for _ in range(MAX_PER_STEP):
         _no_open_transaction(conn)
         with conn.transaction():
@@ -841,7 +849,8 @@ def analyse_pending(conn: psycopg.Connection, analyst: Any, settings: AiSettings
                 continue
             # Built under the claim: if it fails, the claim rolls back and nothing was spent.
             context = build_context(conn, row, now, price_now)
-            _set_status(conn, row["id"], "failed", CLAIM_NOTE.format(at=now.astimezone(timezone.utc)))
+            _set_status(conn, row["id"], "analysing", CLAIM_NOTE.format(at=now.astimezone(timezone.utc)))
+            conn.execute("UPDATE news SET claimed_at = %s WHERE id = %s", (now, row["id"]))
         saved = analyse_article(conn, analyst, row, context, now, "live", settings=settings)
         _no_open_transaction(conn)
         with conn.transaction():

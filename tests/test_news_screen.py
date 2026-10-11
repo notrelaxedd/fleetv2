@@ -79,6 +79,7 @@ def add_prediction(conn, analysis_id, news_id=1, symbol="AAPL", direction="up", 
 
 
 def scored(conn, aid, hit, signed, twin, **kw):
+    kw.setdefault("twin_direction", "down")
     return add_prediction(conn, aid, hit=hit, signed_pct=signed, twin_signed_pct=twin, move_pct=signed, bench_pct=0.0,
                           entry_price=100.0, exit_price=101.0, scored_at=datetime.now(UTC), **kw)
 
@@ -110,7 +111,7 @@ def test_the_page_renders_on_an_empty_database(client, trading):
     assert "No articles yet" in element(html, "data-no-news")
     assert "No open positions" in element(html, "data-no-positions")
     assert element(html, "data-demo") == "demo data"  # the test broker is the fake one
-    assert "Needs 100 scored predictions; has 0." in element(html, 'data-score="stocks"')
+    assert "Needs 100 independent scored calls it would trade; has 0." in element(html, 'data-score="stocks"')
 
 
 def test_the_fragment_has_the_news_regions(client, trading):
@@ -218,10 +219,17 @@ def test_scores_show_hit_rate_result_twin_edge_and_gate(client, conn, trading):
     assert values["hit-rate"] == "75%" and values["scored"] == "4"
     assert values["result"] == "+1.25%"  # (2 + 1 + 3 - 1) / 4
     assert values["twin"] == "+0.25%"  # (0.5 - 0.5 + 0 + 1.0) / 4
-    assert re.fullmatch(r"\+1\.00% ± \d\.\d\d%", values["edge"])  # (1.5 + 1.5 + 3 - 2) / 4
+    # Against the market, twins all "down": (direction - twin) x move = 4, 2, 6 and 0 for the down call.
+    assert re.fullmatch(r"\+3\.00% ± \d\.\d\d%", values["edge"])
     assert "1 waiting for their time to pass" in body and "1 where Claude saw nothing to trade" in body
     assert "coin-flip twin" in body.lower()
-    assert "Needs 100 scored predictions; has 4." in element(block, "data-gate")
+    assert "Needs 100 independent scored calls it would trade; has 4." in element(block, "data-gate")
+    basis = element(block, "data-gate-basis")
+    for words in ("Counted on the calls it would trade", "confidence 0.6 or more", "not already priced in",
+                  "at least 2 times the 0.10% round-trip cost", "never SPY or QQQ", "one per symbol and day",
+                  "against the stock market (SPY)", "different model than the one asked never count",
+                  "The cards below count every call on its own."):
+        assert words in basis
     assert 'data-ok="false"' in tag_of(block, "data-gate")
     assert "4 live" in element(block, "data-source-counts") and "0 replay" in element(block, "data-source-counts")
 
@@ -246,6 +254,18 @@ def test_crypto_scores_stay_apart_from_stocks(client, conn, trading):
     stocks = re.search(r'data-score="stocks".*?data-score="crypto"', html, re.S).group(0)
     assert value(crypto, 'data-metric="result"') == "+4.00%"
     assert value(stocks, 'data-metric="result"') == "-"
+    basis = element(crypto, "data-gate-basis")
+    assert "0.70% round-trip cost" in basis and "rises only" in basis and "against Bitcoin" in basis
+
+
+def test_replays_answered_by_a_fallback_model_are_left_out(client, conn, trading):
+    add_article(conn)
+    aid = add_analysis(conn, source="replay")
+    conn.execute("UPDATE news_analyses SET served_model = 'another-model' WHERE id = %s", (aid,))
+    scored(conn, aid, True, 2.0, 0.0, source="replay")
+    block = re.search(r'data-score="stocks".*?data-score="crypto"', client.get("/news").text, re.S).group(0)
+    assert value(block, 'data-metric="scored"') == "0"
+    assert "1 replay left out (answered by a fallback model)" in card(block, 'data-metric="scored"')
 
 
 def test_the_up_down_and_confidence_tables_are_there(client, conn, trading):
@@ -265,7 +285,7 @@ def test_start_is_disabled_with_the_gates_reason_when_the_gate_fails(client, tra
     book = re.search(r'data-book="stocks".*?</article>\s*(?=<article class="card nblock" data-book="crypto")', html, re.S).group(0)
     start = tag_of(book, 'data-action="news-start"')
     assert " disabled" in start and 'data-market="stocks"' in start
-    assert "Cannot start yet: Needs 100 scored predictions; has 0." in element(book, "data-start-reason")
+    assert "Cannot start yet: Needs 100 independent scored calls it would trade; has 0." in element(book, "data-start-reason")
     assert " disabled" in tag_of(book, 'data-action="news-stop"')  # nothing to stop
     assert element(book, "data-book-status") == "Not started"
 

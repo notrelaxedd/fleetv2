@@ -1,10 +1,18 @@
 """Safety controls: the pause switch, the daily loss limit, the money limits, and
 approve_and_place(), the one path every order takes to Alpaca.
 
-- Pause all trading: one switch. While it is on, no order is placed for any model;
-  backtests and model searches keep running. Only the owner resumes it.
+- Pause all trading: one switch. While it is on, no order is placed for any model
+  (except a news book's protective reducing orders, below); backtests and model
+  searches keep running. Only the owner resumes it.
 - Daily loss limit: when the account is down more than daily_loss_limit_pct today
   (config/limits.toml, default 2%), trading pauses itself and says why.
+- Reducing orders (the futures precedent): an order that only reduces a position the
+  book holds (a sell of at most the long held, a buy by qty of at most the shares
+  short) skips the daily loss check, for any book: it can only lower risk. While
+  paused, a reducing order of a news book still goes out when it is protective
+  (order["protective"]: a stop-loss exit, or closing a book the owner stopped);
+  every other order waits for the owner to resume. The mode, the market clock and
+  the account reading still apply to every order, and the caps to opening orders.
 - Per-model limits: a buy never takes a model past max_per_position in one symbol or
   max_per_model in total, and never spends more cash than the model's book holds.
 - Every order is written to the orders table (model, worker, time, reason) before it
@@ -163,6 +171,20 @@ def _origin(conn: psycopg.Connection, model_id: str) -> str | None:
     return row["origin"] if row else None
 
 
+def is_reducing(conn: psycopg.Connection, book: dict[str, Any], order: dict[str, Any]) -> bool:
+    """True when the order only reduces a position the book holds: a sell of at most
+    the long held, or a buy by qty (a cover) of at most the shares short."""
+    row = conn.execute("SELECT qty FROM positions WHERE book_id = %s AND symbol = %s",
+                       (book["id"], order["symbol"])).fetchone()
+    held = float(row["qty"]) if row else 0.0
+    qty = float(order.get("qty") or 0.0)
+    if qty <= 0:
+        return False
+    if order["side"] == "sell":
+        return held > 0 and qty <= held * (1 + 1e-9)
+    return order.get("notional") is None and held < 0 and qty <= -held * (1 + 1e-9)
+
+
 def limit_problem(conn: psycopg.Connection, book: dict[str, Any], order: dict[str, Any], prices: dict[str, float],
                   limits: Limits, broker: Any = None) -> str | None:
     """Why the order breaks a money limit or a short rule, or None (module docstring).
@@ -317,18 +339,24 @@ def approve_and_place(conn: psycopg.Connection, status: BrokerStatus, limits: Li
     """Check one order and, when it passes, send it to Alpaca. Always logs a row.
 
     order: {"symbol", "side": "buy"|"sell", "notional" (buys) | "qty" (sells, and buys
-    that cover a short), "reason", "worker_id"}. Checks, in order: the pause switch,
-    the broker's mode against the book's, a fresh account reading and the daily loss
-    limit (no reading means no order: it fails closed), the stock market being open (no
-    clock means closed), then the money limits and the short rules (limit_problem). The row is committed as "submitting" before Alpaca is called, so
-    an order can never reach Alpaca without a record of it. The pause lock is held
-    until Alpaca has answered, so once pause_trading() returns no order is in flight.
+    that cover a short), "reason", "worker_id", optionally "protective" (news books
+    only: a stop-loss exit or the closing of a stopped book)}. Checks, in order: the
+    pause switch (a protective reducing order of a news book passes it), the broker's
+    mode against the book's, a fresh account reading and the daily loss limit (no
+    reading means no order: it fails closed; an order that only reduces a position
+    skips the loss check, see is_reducing), the stock market being open (no clock means
+    closed), then the money limits and the short rules (limit_problem). The row is
+    committed as "submitting" before Alpaca is called, so an order can never reach
+    Alpaca without a record of it. The pause lock is held until Alpaca has answered, so
+    once pause_trading() returns no order is in flight.
     """
     broker = status.broker
     conn.execute("SELECT pg_advisory_lock(%s)", (PAUSE_LOCK,))
     try:
         problem = None
-        if is_paused(conn):
+        reducing = is_reducing(conn, book, order)
+        if is_paused(conn) and not (reducing and order.get("protective")
+                                    and _origin(conn, book["model_id"]) == "news"):
             problem = PAUSED
         elif broker.mode != book["mode"]:
             problem = f"this model trades {book['mode']} money but the coordinator is in {broker.mode} mode"
@@ -337,7 +365,7 @@ def approve_and_place(conn: psycopg.Connection, status: BrokerStatus, limits: Li
             account = status.account_info
             if account is None or account.last_equity <= 0:
                 problem = NO_ACCOUNT
-            else:
+            elif not reducing:
                 problem = check_daily_loss(conn, status, limits)
         if problem is None and "/" not in order["symbol"]:
             if status.clock_info is None:

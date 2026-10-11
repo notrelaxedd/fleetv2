@@ -20,8 +20,17 @@ Why it is built this way:
   plus Alpaca's 25 bp taker fee each way. These are the backtester's COSTS.
 - A coin-flip twin. Every prediction is scored next to a twin with the same entry and
   exit bars but a random direction, seeded by the prediction id so it never changes. A
-  forecaster with no skill beats its twin only by luck; the gate asks for the paired
-  edge to be more than two standard errors above zero before any money is risked.
+  forecaster with no skill beats its twin only by luck. The edge is measured against the
+  market (the move minus the benchmark's, signed by direction, both sides paying the
+  call's own costs), so a forecaster that only rides the market's drift, or only saves
+  the borrow fee by never shorting, has no edge at all.
+- The gate counts what would be traded. Only the calls the news strategy would act on
+  (`would_trade`, the very predicate coordinator.news_trading uses for its entries), only
+  one observation per symbol, entry day and direction (nine articles making the same call
+  on the same day are one call, not nine), and no replay answered by a different model
+  than the one asked (a refusal fallback may have a later training cutoff, so it may know
+  the outcome). It asks for the edge to be more than two standard errors above zero over
+  enough such independent calls, and for those calls to make money after costs.
 - Scores are frozen. Entry and exit prices are written to the prediction, read from one
   snapshot of the bar cache (stock bars are re-downloaded split- and dividend-adjusted,
   so stored prices can shift later; the ratio we keep does not).
@@ -31,7 +40,7 @@ from __future__ import annotations
 import logging
 import math
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import numpy as np
@@ -39,6 +48,7 @@ import psycopg
 
 from coordinator.data import TIMEFRAME_DELTA
 from coordinator.limits import Limits
+from coordinator.safety import NEWS_EXCLUDED
 from fleet2.sim.backtest import COSTS
 from fleet2.universe import MARKETS
 
@@ -54,6 +64,9 @@ BENCH_SLACK = {"stocks": timedelta(days=4), "crypto": timedelta(hours=3)}
 OVERDUE_EXTRA_DAYS = 4
 OVERDUE_NOTE = ("Its horizon has passed but the price bars needed to score it (the symbol's or the "
                 "benchmark's) are not in the cache; it stays unscored until they arrive.")
+# An edge must also clear this (in percent), so rounding noise in a sample with no
+# spread at all is never read as skill.
+EDGE_FLOOR = 1e-9
 BUCKETS = ((0.0, 0.5, "0–0.5"), (0.5, 0.6, "0.5–0.6"), (0.6, 0.7, "0.6–0.7"), (0.7, 0.8, "0.7–0.8"),
            (0.8, 1.0, "0.8–1.0"))
 
@@ -125,6 +138,40 @@ def cost_pct(market: str, direction: str, days: int, limits: Limits) -> float:
     return pct
 
 
+def round_trip_cost_pct(market: str) -> float:
+    """Costs of buying and selling once, in percent (stocks 0.10, crypto 0.70), from the
+    backtester's own cost model (no borrow fee)."""
+    return 2.0 * COSTS[market].rate * 100.0
+
+
+def skip_reason(p: dict[str, Any], market: str, limits: Limits) -> str | None:
+    """Why the news strategy would not trade this prediction, or None when it would.
+
+    The one definition of "a prediction the strategy would trade", shared by the gate
+    (which counts only these) and coordinator.news_trading's entries (which act only on
+    these), so the two can never drift apart. Needs the prediction's symbol, direction,
+    confidence, already_priced_in and expected_move_pct.
+    """
+    if p["symbol"] in NEWS_EXCLUDED:
+        return "SPY and QQQ are left to the futures paper books"
+    if p["direction"] not in ("up", "down"):
+        return "no direction"
+    if market == "crypto" and p["direction"] == "down":
+        return "Alpaca cannot short coins"
+    if p["confidence"] < limits.min_confidence:
+        return "not confident enough"
+    if p["already_priced_in"]:
+        return "already priced in"
+    if p["expected_move_pct"] < limits.cost_multiple * round_trip_cost_pct(market):
+        return "too small a move to beat the costs"
+    return None
+
+
+def would_trade(p: dict[str, Any], market: str, limits: Limits) -> bool:
+    """True when the news strategy would trade this prediction (see skip_reason)."""
+    return skip_reason(p, market, limits) is None
+
+
 def score_row(row: dict[str, Any], market: str, limits: Limits, now: datetime) -> dict[str, Any]:
     """The score columns for one candidate row (entry/exit/benchmark prices already chosen).
 
@@ -192,10 +239,10 @@ def _filters(market: str | None, source: str | None, model: str | None,
     where, args = ["TRUE"], []
     for column, value in (("market", market), ("source", source), ("model", model)):
         if value is not None:
-            where.append(f"{column} = %s")
+            where.append(f"p.{column} = %s")
             args.append(value)
     if min_confidence is not None:
-        where.append("confidence >= %s")
+        where.append("p.confidence >= %s")
         args.append(min_confidence)
     return " AND ".join(where), args
 
@@ -204,31 +251,93 @@ def _mean(values: np.ndarray) -> float | None:
     return float(values.mean()) if len(values) else None
 
 
-def stats(conn: psycopg.Connection, market: str | None = None, source: str | None = None,
-          model: str | None = None, min_confidence: float | None = None) -> dict[str, Any]:
-    """How the scored predictions did (filters optional). Unscored rows never count.
+def _sign(direction: str | None) -> float:
+    return {"up": 1.0, "down": -1.0}.get(direction or "", 0.0)
 
-    Percentages are plain numbers (1.5 means 1.5%). edge_pct is the mean of the paired
-    difference signed_pct - twin_signed_pct and edge_se_pct its standard error; a value
-    that cannot be computed (no rows, or one row for a standard error) is None.
+
+def _observation(r: dict[str, Any]) -> dict[str, float]:
+    """One scored prediction as numbers. relative_pct is the call's benchmark-relative
+    result after its own costs (the move minus the benchmark's, signed by direction);
+    twin_relative_pct is the twin's on the same bars, charged the very same costs, so the
+    paired difference is the direction skill alone: neither the market's drift nor the
+    borrow fee a short pays can make an edge."""
+    sign = _sign(r["direction"])
+    twin = r["twin_direction"] or twin_direction(r["id"])
+    move, bench = float(r["move_pct"] or 0.0), float(r["bench_pct"] or 0.0)
+    cost = sign * move - float(r["signed_pct"])
+    return {
+        "hit": float(bool(r["hit"])), "signed": float(r["signed_pct"]), "twin": float(r["twin_signed_pct"]),
+        "relative": sign * (move - bench) - cost, "twin_relative": _sign(twin) * (move - bench) - cost,
+        "confidence": float(r["confidence"]),
+    }
+
+
+def _independent(rows: list[dict[str, Any]]) -> list[tuple[str, dict[str, float]]]:
+    """(direction, observation) per independent call: the scored predictions of one symbol,
+    entry day (UTC date of the entry bar; for stocks, the entry bar itself) and direction
+    are averaged into one, because they are the same bet on the same price move."""
+    groups: dict[tuple, list[dict[str, Any]]] = {}
+    for r in rows:
+        day = r["entry_ts"].astimezone(timezone.utc).date() if r["entry_ts"] is not None else ("id", r["id"])
+        groups.setdefault((r["symbol"], day, r["direction"]), []).append(r)
+    out = []
+    for (_, _, direction), members in groups.items():
+        obs = [_observation(m) for m in members]
+        out.append((direction, {k: sum(o[k] for o in obs) / len(obs) for k in obs[0]}))
+    return out
+
+
+def stats(conn: psycopg.Connection, market: str | None = None, source: str | None = None,
+          model: str | None = None, min_confidence: float | None = None,
+          trading: Limits | None = None) -> dict[str, Any]:
+    """How the scored predictions did (filters optional). Unscored rows never count, and
+    neither does a replay whose analysis was answered by a different model than the one
+    asked (a refusal fallback may have a later training cutoff): fallback_excluded says
+    how many scored ones were left out for that.
+
+    With `trading` (the limits), only the predictions the news strategy would trade count
+    (would_trade), and they are collapsed into independent calls (one per symbol, entry
+    day and direction, averaged): n then counts those calls and `predictions` the rows
+    behind them. Without it every call counts on its own (n == predictions).
+
+    Percentages are plain numbers (1.5 means 1.5%). mean_signed_pct and mean_twin_pct are
+    absolute results after costs (what a book would earn). edge_pct is the mean paired
+    difference between the call and its twin measured against the benchmark
+    (mean_relative_pct - mean_twin_relative_pct, both after the call's own costs), and
+    edge_se_pct its standard error; a value that cannot be computed (no rows, or one row
+    for a standard error) is None.
     """
     where, args = _filters(market, source, model, min_confidence)
-    counts = conn.execute(
-        "SELECT count(*) FILTER (WHERE scored_at IS NULL AND direction <> 'none') AS pending,"
-        " count(*) FILTER (WHERE direction = 'none') AS none_count"
-        f" FROM news_predictions WHERE {where}", args,
-    ).fetchone()
     rows = conn.execute(
-        "SELECT direction, confidence, hit, signed_pct, twin_signed_pct FROM news_predictions"
-        f" WHERE {where} AND scored_at IS NOT NULL AND direction <> 'none' ORDER BY id", args,
+        "SELECT p.id, p.market, p.symbol, p.direction, p.confidence, p.already_priced_in, p.expected_move_pct,"
+        " p.hit, p.signed_pct, p.twin_signed_pct, p.twin_direction, p.move_pct, p.bench_pct, p.entry_ts,"
+        " p.scored_at IS NOT NULL AS scored,"
+        # A dated snapshot name of the requested model (claude-opus-5-5-YYYYMMDD) is the same model.
+        " (p.source = 'live' OR a.served_model = a.requested_model"
+        "  OR a.served_model LIKE a.requested_model || '-%%') AS honest"
+        " FROM news_predictions p JOIN news_analyses a ON a.id = p.analysis_id"
+        f" WHERE {where} ORDER BY p.id", args,
     ).fetchall()
-    n = len(rows)
-    hit = np.array([bool(r["hit"]) for r in rows], dtype=float)
-    signed = np.array([r["signed_pct"] for r in rows], dtype=float)
-    twin = np.array([r["twin_signed_pct"] for r in rows], dtype=float)
-    conf = np.array([r["confidence"] for r in rows], dtype=float)
-    direction = np.array([r["direction"] for r in rows], dtype=object)
-    diff = signed - twin
+    if trading is not None:
+        rows = [r for r in rows if r["direction"] == "none" or would_trade(r, r["market"], trading)]
+    fallback = sum(1 for r in rows if r["scored"] and r["direction"] != "none" and not r["honest"])
+    rows = [r for r in rows if r["honest"]]
+    pending = sum(1 for r in rows if not r["scored"] and r["direction"] != "none")
+    none_count = sum(1 for r in rows if r["direction"] == "none")
+    done = [r for r in rows if r["scored"] and r["direction"] != "none"]
+    if trading is not None:
+        calls = _independent(done)
+    else:
+        calls = [(r["direction"], _observation(r)) for r in done]
+    n = len(calls)
+
+    def column(key: str) -> np.ndarray:
+        return np.array([o[key] for _, o in calls], dtype=float)
+
+    hit, signed, twin, conf = column("hit"), column("signed"), column("twin"), column("confidence")
+    relative, twin_relative = column("relative"), column("twin_relative")
+    direction = np.array([d for d, _ in calls], dtype=object)
+    diff = relative - twin_relative
     edge = _mean(diff)
     se = float(diff.std(ddof=1) / math.sqrt(n)) if n >= 2 else None
     calibration = []
@@ -240,16 +349,22 @@ def stats(conn: psycopg.Connection, market: str | None = None, source: str | Non
         mask = direction == d
         by_direction[d] = {"n": int(mask.sum()), "hit_rate": _mean(hit[mask]),
                            "mean_signed_pct": _mean(signed[mask])}
+    # EDGE_FLOOR keeps rounding noise in a zero-variance sample from counting as an edge.
+    beats = bool(n >= 2 and edge is not None and se is not None and edge > max(2 * se, EDGE_FLOOR))
     return {
         "n": n,
-        "pending": int(counts["pending"]),
-        "none_count": int(counts["none_count"]),
+        "predictions": len(done),
+        "pending": pending,
+        "none_count": none_count,
+        "fallback_excluded": fallback,
         "hit_rate": _mean(hit),
         "mean_signed_pct": _mean(signed),
         "mean_twin_pct": _mean(twin),
+        "mean_relative_pct": _mean(relative),
+        "mean_twin_relative_pct": _mean(twin_relative),
         "edge_pct": edge,
         "edge_se_pct": se,
-        "beats_twin": bool(n >= 2 and edge is not None and se is not None and edge > 2 * se),
+        "beats_twin": beats,
         "calibration": calibration,
         "by_direction": by_direction,
     }
@@ -258,22 +373,26 @@ def stats(conn: psycopg.Connection, market: str | None = None, source: str | Non
 def gate(conn: psycopg.Connection, market: str, limits: Limits) -> tuple[bool, str]:
     """May this market's news strategy start paper trading? (passes, one plain sentence)
 
-    Counts the market's scored predictions from both sources at the confidence it would
-    trade (>= limits.min_confidence). Passes only with at least min_scored_predictions of
-    them, an edge over the coin-flip twin above two standard errors, and a positive mean
-    return after costs.
+    Counts the market's scored predictions from both sources that the strategy would
+    trade (would_trade: confident enough, not already priced in, a big enough expected
+    move, never SPY or QQQ, rises only for coins), one per symbol, entry day and
+    direction, leaving out replays answered by a fallback model. Passes only with at least
+    min_scored_predictions such independent calls, an edge over the coin-flip twin against
+    the market above two standard errors, and a positive mean absolute return after costs.
     """
     if market not in MARKETS:
         raise ValueError(f"unknown market {market!r}")
-    s = stats(conn, market=market, min_confidence=limits.min_confidence)
+    s = stats(conn, market=market, trading=limits)
     need = max(int(math.ceil(limits.min_scored_predictions)), 2)
     n = s["n"]
+    calls = f"{n} independent call{'s' if n != 1 else ''}"
     if n < need:
-        return False, f"Needs {need} scored predictions; has {n}."
+        return False, f"Needs {need} independent scored calls it would trade; has {n}."
     edge, se = s["edge_pct"], s["edge_se_pct"]
     if not s["beats_twin"]:
-        return False, f"Does not beat the coin-flip twin yet: edge {edge:+.2f}% ± {se:.2f}%."
+        return False, (f"Does not beat the coin-flip twin against the market yet: "
+                       f"edge {edge:+.2f}% ± {se:.2f}% over {calls}.")
     if s["mean_signed_pct"] <= 0:
         return False, (f"Beats the coin-flip twin but loses money after costs: "
-                       f"{s['mean_signed_pct']:+.2f}% a prediction on average.")
-    return True, f"Ready: {n} scored predictions, edge {edge:+.2f}% ± {se:.2f}% over the coin flip."
+                       f"{s['mean_signed_pct']:+.2f}% a call on average over {calls}.")
+    return True, f"Ready: {calls}, edge {edge:+.2f}% ± {se:.2f}% over the coin flip, against the market."

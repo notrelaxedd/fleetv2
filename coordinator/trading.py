@@ -23,6 +23,7 @@ see _book_fill for how a short is booked.
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -33,7 +34,7 @@ from coordinator.broker import BrokerStatus, BrokerUnavailable
 from coordinator.errors import BadRequest, Conflict, NotFound
 from coordinator.limits import Limits
 from coordinator.models import get_model
-from coordinator.safety import HALTS, approve_and_place, is_paused
+from coordinator.safety import HALTS, _origin, approve_and_place, is_paused
 from coordinator.broker import NEVER_REACHED
 from fleet2.models import get_module
 from fleet2.models.base import BadTargets, clean_targets
@@ -300,7 +301,12 @@ def _book_fill(conn: psycopg.Connection, order: dict[str, Any], new_qty: float, 
     back toward 0 and takes the dollars from cash. `cost` keeps the sign of qty: for a
     short it is minus the dollars received for the shares still short. So, long or
     short, cost / qty is the average entry price and qty x price - cost is the open
-    profit, and the book's value is always cash + sum(qty x price)."""
+    profit, and the book's value is always cash + sum(qty x price). A book whose model
+    is not a news strategy never goes short: a sale filled bigger than what it held is
+    booked only up to what it held (and a warning is logged).
+
+    `price` is the average price of this increment (poll_fills works it out from
+    Alpaca's average over the whole order)."""
     fee = COSTS["crypto"].fee_bps / 10_000.0 if "/" in order["symbol"] else 0.0
     key = (order["book_id"], order["symbol"])
     pos = conn.execute("SELECT qty, cost FROM positions WHERE book_id = %s AND symbol = %s FOR UPDATE", key).fetchone()
@@ -333,6 +339,13 @@ def _book_fill(conn: psycopg.Connection, order: dict[str, Any], new_qty: float, 
     # sold out anything left over is rounding, not a short.
     if shorted <= 0 or (held > 0 and shorted * price < 0.01):
         return
+    if _origin(conn, order["model_id"]) != "news":
+        # Only news books may be short. A bigger fill than was held (say, a sale planned
+        # again after a lost answer from Alpaca) is booked only up to what was held.
+        log.warning("order %s of %s filled %.6g %s but the book held %.6g: the extra %.6g is not booked as a short "
+                    "(only news strategies short); check the Alpaca account", order["id"], order["model_id"],
+                    new_qty, order["symbol"], max(held, 0.0), shorted)
+        return
     got = shorted * price * (1.0 - fee)
     conn.execute(
         """
@@ -343,6 +356,22 @@ def _book_fill(conn: psycopg.Connection, order: dict[str, Any], new_qty: float, 
         (*key, -shorted, -got),
     )
     conn.execute("UPDATE books SET cash = cash + %s WHERE id = %s", (got, order["book_id"]))
+
+
+def _increment_price(order: dict[str, Any], filled_qty: float, avg: float, new_qty: float) -> float:
+    """The average price of the part of a fill not booked yet. Alpaca's filled_avg_price
+    is over the whole order, so the increment is (filled_qty x avg - dollars already
+    booked) / new_qty. What was booked is booked_qty x the filled_avg_price stored with
+    it: poll_fills stores the order's average each time it books, and never clears it."""
+    booked_qty = float(order["booked_qty"] or 0.0)
+    if booked_qty <= 0 or not order["filled_avg_price"]:
+        return avg
+    price = (filled_qty * avg - booked_qty * float(order["filled_avg_price"])) / new_qty
+    if not math.isfinite(price) or price <= 0:
+        log.warning("order %s: increment price %.6g makes no sense; booking at the average %.6g",
+                    order["id"], price, avg)
+        return avg
+    return price
 
 
 def _reduce(conn: psycopg.Connection, key: tuple[int, str], pos: dict[str, Any], amount: float, price: float) -> None:
@@ -383,12 +412,13 @@ def poll_fills(conn: psycopg.Connection, status: BrokerStatus, book_id: int | No
         new_qty = max(0.0, state.filled_qty - order["booked_qty"])
         booked = 0.0
         if new_qty > 0 and state.filled_avg_price:
-            _book_fill(conn, order, new_qty, state.filled_avg_price)
+            _book_fill(conn, order, new_qty, _increment_price(order, state.filled_qty, state.filled_avg_price, new_qty))
             booked = new_qty
         done = state.status in ("filled", "cancelled", "rejected")
         conn.execute(
             """
-            UPDATE orders SET status = %s, filled_qty = %s, filled_avg_price = %s, booked_qty = booked_qty + %s,
+            UPDATE orders SET status = %s, filled_qty = %s, filled_avg_price = COALESCE(%s, filled_avg_price),
+                   booked_qty = booked_qty + %s,
                    error = CASE WHEN %s IN ('filled', 'partially_filled') THEN NULL ELSE COALESCE(%s, error) END,
                    finished_at = CASE WHEN %s THEN now() ELSE finished_at END
              WHERE id = %s

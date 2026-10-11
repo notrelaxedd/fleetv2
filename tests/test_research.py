@@ -702,14 +702,15 @@ def test_the_call_is_made_with_no_transaction_open_on_a_claimed_article(conn, te
         research.analyse_pending(loop_conn, analyst(Watching(answer={"predictions": []})), SETTINGS, NOW, None)
     (txn, during, other_loop), = seen
     assert txn == psycopg.pq.TransactionStatus.IDLE
-    assert during["analysis_status"] == "failed" and "being analysed" in during["analysis_note"]
+    assert during["analysis_status"] == "analysing" and "being analysed" in during["analysis_note"]
     assert sum(other_loop.values()) == 0                                # the other loop found nothing to take
     assert status(conn)["analysis_status"] == "analysed"
 
 
 def test_an_article_whose_call_never_finished_is_not_paid_for_again(conn):
     """The process dies during the call (here: an exception no handler catches). The
-    article stays claimed as 'failed', never 'pending', so the next pass leaves it alone."""
+    article stays claimed as 'analysing', never 'pending', so the next pass leaves it alone,
+    and once the claim is stale it becomes 'failed', still not tried again."""
     add_news(conn, ours=("AAPL",))
 
     class Dying(FakeClient):
@@ -721,6 +722,9 @@ def test_an_article_whose_call_never_finished_is_not_paid_for_again(conn):
     with pytest.raises(SystemExit):
         research.analyse_pending(conn, analyst(client), SETTINGS, NOW, None)
     st = status(conn)
-    assert st["analysis_status"] == "failed" and "being analysed" in st["analysis_note"]
+    assert st["analysis_status"] == "analysing" and "being analysed" in st["analysis_note"]
     research.analyse_pending(conn, analyst(client), SETTINGS, NOW, None)
-    assert len(client.requests) == 1
+    assert len(client.requests) == 1 and status(conn)["analysis_status"] == "analysing"
+    research.analyse_pending(conn, analyst(client), SETTINGS, NOW + research.STALE_CLAIM + timedelta(minutes=1), None)
+    st = status(conn)
+    assert len(client.requests) == 1 and st["analysis_status"] == "failed" and "halfway" in st["analysis_note"]

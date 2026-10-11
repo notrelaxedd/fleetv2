@@ -208,6 +208,10 @@ def test_an_article_edited_after_the_decision_time_is_skipped_and_counted(conn):
     assert "1 skipped (edited after the decision time" in out["lines"][-1]
     assert count(conn, "SELECT count(*) AS n FROM news_analyses WHERE news_id = 1") == 0
     assert count(conn, "SELECT count(*) AS n FROM ai_calls") == 3
+    # Marked once: a second run neither sends nor counts it again.
+    assert count(conn, "SELECT count(*) AS n FROM news WHERE id = 1 AND analysis_status = 'skipped'") == 1
+    again = go(conn, a)
+    assert again["skipped"] == 0 and again["waiting"] == 0
 
 
 def test_skipped_articles_show_in_the_progress_lines(conn):
