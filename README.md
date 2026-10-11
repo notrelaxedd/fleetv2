@@ -162,11 +162,45 @@ coordinator, which places the orders in the Alpaca paper account. **Stop paper t
 sells the model's positions and closes its book. While models paper trade, the
 coordinator keeps their prices fresh by itself.
 
-**Start model search** tries new settings for the model files. It draws seeded random
-settings, tests each on the training period only, keeps the best, and then measures it
-once on the held-out period it never saw. It repeats until you press Stop model search,
-and keeps at most five found models per model file (the one with the lowest training
-score is dropped when a better one is found).
+Trading costs are kept low on purpose. A held position is only resized when its target
+has moved by at least 20% (and at least $25), so small price moves do not pay fees.
+Opening and closing trades are not affected, and backtests follow the same rule. Crypto
+trend decides at most once a day, since a crypto round trip (buy and sell) costs about
+0.7%.
+
+**Start model search** tries new settings for the model files. It tests each one on the
+training period only, keeps the best, and then measures it once on the held-out period it
+never saw. It repeats until you press Stop model search. It keeps at most five found
+models per model file. A find that passes the checks below beats one that does not;
+otherwise the higher training score wins.
+
+It also keeps a **search log** on box1 with every setting it tries, how it did on
+training and why it was thrown away. The log does three things:
+
+- **Learns.** After about 20 scored settings for a model file, most new settings lean
+  toward the ones that scored well and away from the ones that failed. About 30% stay
+  random, so it keeps looking in new places. The log survives restarts.
+- **Checks.** Each round's best find is tested again on training prices only. The score
+  is its yearly return minus buy and hold's, so extra trades alone earn nothing. The
+  training period is split into four parts and the worst part counts. Each setting is
+  also nudged 10% either way, tested at double trading costs and compared with random
+  coin-flip trades. A model that fails a check is still shown on the Models screen, with
+  a tag ("Inconsistent", "Fragile settings", "Breaks at higher costs" or "No better than
+  random"), but it is not ranked.
+- **Gives up.** A model file that reaches 2,000 tries with nothing positive gives up. It
+  gets no more worker time, and the status line says "N model files gave up". When every
+  model file gives up, the search stops and says that new model ideas are needed. To let
+  them try again, reset the log on box1:
+
+  ```bash
+  docker compose exec coordinator python -m coordinator.cli reset-search-log
+  ```
+
+  Add `--market stocks` or `--market crypto` to clear one market, or `--family NAME` for
+  one model file.
+
+None of this guarantees a model that makes money. It stops the search wasting time and
+rewarding luck. "Gave up" means that file needs new ideas, not more time.
 
 ## Futures models
 
@@ -301,22 +335,37 @@ stand-in, "synthetic" in demo mode), with two buttons:
 
 How futures model search works:
 
-- **Score**: training is cut into four back-to-back parts. In each part the model's
-  daily profit and loss at one contract and **double slippage** gives a Sharpe ratio
-  (return against how bumpy it was). The score is the worst of the four, so a setting
-  that only worked in one stretch scores low.
+- **Winners**: a setting wins a round by what it would have done in Topstep Combines on
+  **training** prices, not only by how steady its daily profit was. The Combine simulator
+  runs the training days at every contract size and sees each attempt pass, fail or run
+  out of time. The score is the expected dollars per attempt at the best size. A setting
+  that never passes scores the floor (every monthly fee of an attempt plus the activation
+  fee), below anything that passes even once, so it cannot win. On the held-out results
+  such a model shows about -$147: it pays the monthly fee (about $49) for about three
+  months until time runs out. The Futures view says so ("Never reaches the target: it
+  pays the monthly fee until time runs out."). Steadiness (a Sharpe ratio
+  per training part, at double slippage, the worst part counting) only breaks ties.
+  Held-out prices still never choose a setting, and the lockbox stays untouched until
+  Final check.
 - **Gates**: it must trade on at least 100 different training days and make money at
   normal and at double slippage.
-- **Proposals**: half of each round's settings are random, half are small changes to
-  the models already kept. Every setting can be made again from its seed text, which
+- **Proposals**: half of each round's settings come from the search log (see "Start
+  model search"), half are small changes to the models already kept. Recipes are still
+  tried with random settings. Every setting can be made again from its seed text, which
   names the parent model for a change.
 - **Robustness**: the best setting of a round is tried again with each number moved 10%
-  down and 10% up. If the middle one of those scores under half as well, the winner sat
-  on a lucky peak and is dropped.
+  down and 10% up. If the middle one of those keeps less than half of the winner's gain
+  above the fee floor, the winner sat on a lucky peak and is dropped.
 - **Keeping**: at most five found models per model file. A new find replaces the kept
   model with the most similar settings when it scores higher. A find whose daily
   results move more than 90% like a kept model's is the same idea twice: it only
   replaces that model if it scores higher.
+- **Giving up**: a model file or recipe gives up after 2,000 tries with nothing positive.
+  Once the fees and payout cap are set, it also gives up after 5 of its finds have been
+  held-out tested and none beat the fee floor or its coin-flip twin. A family that gave
+  up gets no more worker time, and the status line says "N model files gave up". If every
+  futures model file gives up, the search keeps going on recipes. Reset the log as shown
+  under "Start model search" (add `--market futures` to clear only the futures log).
 - **Chance this is luck**: every setting tried is counted. The more tries, the more one
   of them looks good by luck alone; this figure (the deflated Sharpe ratio) says how
   likely that is for each model. Lower is better.
