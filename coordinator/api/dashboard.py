@@ -45,7 +45,8 @@ def _models_context(request: Request, conn: psycopg.Connection) -> dict[str, Any
     now = datetime.now(timezone.utc)
     if request.query_params.get("market") == "futures":
         page = futures_view.futures_page(conn, request.app.state.topstep, request.query_params.get("id"),
-                                         search=search.search_status(conn), venues=request.app.state.venues)
+                                         search=search.search_status(conn), venues=request.app.state.venues,
+                                         show_all=request.query_params.get("all") == "1")
         ai, key = request.app.state.ai, request.app.state.ai_key
         page["haiku"] = ai_ideas.status_line(conn, ai, key)
         page["market_note"] = market_note.view(conn, ai, key, request.app.state.news)

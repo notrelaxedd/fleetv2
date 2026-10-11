@@ -2,7 +2,7 @@
 {% block title %}Models{% endblock %}
 {% block content %}
 <h1 class="sr-only">Models</h1>
-<div class="models{% if not models %} no-models{% endif %}" data-models-screen data-selected-id="{{ selected.id if selected else '' }}" data-market="{{ 'futures' if view == 'futures' else '' }}">
+<div class="models{% if not models %} no-models{% endif %}" data-models-screen data-selected-id="{{ selected.id if selected else '' }}" data-market="{{ 'futures' if view == 'futures' else '' }}" data-all="{{ '1' if show_all else '' }}">
   <section class="models-side" id="all-models" aria-label="All models">
     <nav class="mtabs" aria-label="Markets">
       <a href="/models" data-tab="stocks"{% if view != "futures" %} class="current" aria-current="page"{% endif %}>Stocks and crypto</a>
