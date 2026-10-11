@@ -9,6 +9,11 @@ Honesty rules (owner's spec), each enforced here:
   below the open); crypto fills also pay Alpaca's crypto taker fee.
 - Same limits as paper trading: the model's starting money, the most per position and
   the most in total (config/limits.toml), no short selling, no borrowing.
+- Same orders as paper trading: rebalance_trades() decides what to trade for both, so
+  a held position is only resized when it is at least REBALANCE_BAND (20%) of its
+  target and MIN_TRADE_DOLLARS away from it. Price drift alone does not pay for a
+  stream of small top-ups and trims; buying into a new position and selling one out
+  entirely are never held back by the band.
 - Positions still open at the end are valued as if sold at the last close, costs
   included, so ROI never counts money the model could not have taken out.
 
@@ -44,7 +49,11 @@ class Costs:
 # Crypto: 10 bp slippage plus Alpaca's 25 bp taker fee (lowest volume tier, looked up
 # in Alpaca's crypto fee schedule).
 COSTS = {"stocks": Costs(slippage_bps=5.0, fee_bps=0.0), "crypto": Costs(slippage_bps=10.0, fee_bps=25.0)}
+# No order under this many dollars (except selling a position out entirely).
 MIN_TRADE_DOLLARS = 25.0
+# A held position the model still wants is resized only when it is at least this
+# fraction of its target away from it (and at least MIN_TRADE_DOLLARS).
+REBALANCE_BAND = 0.20
 
 
 @dataclass(frozen=True)
@@ -87,6 +96,11 @@ class Run:
 Progress = Callable[[float], None]
 
 
+def _budget(equity: float, limits: Limits, reserved: float) -> float:
+    """The most the model's tradable positions may be worth together."""
+    return min(limits.max_per_model, max(equity, 0.0)) - reserved
+
+
 def _cap_targets(weights: dict[str, float], equity: float, limits: Limits, reserved: float = 0.0) -> dict[str, float]:
     """Dollar targets: weight x equity, each at most max_per_position, all together at
     most max_per_model (scaled down evenly when over). `reserved` is money already
@@ -94,12 +108,51 @@ def _cap_targets(weights: dict[str, float], equity: float, limits: Limits, reser
     model's total, so a stuck position never lets the model invest past its cap."""
     dollars = {s: min(w * equity, limits.max_per_position) for s, w in weights.items()}
     total = sum(dollars.values())
-    budget = min(limits.max_per_model, max(equity, 0.0)) - reserved
+    budget = _budget(equity, limits, reserved)
     if total > budget > 0:
         dollars = {s: d * budget / total for s, d in dollars.items()}
     elif budget <= 0:
         dollars = {}
     return dollars
+
+
+def rebalance_trades(held: dict[str, float], weights: dict[str, float], equity: float, limits: Limits,
+                     reserved: float = 0.0) -> dict[str, float]:
+    """The trades that move positions worth `held` dollars towards `weights` x `equity`
+    (capped by _cap_targets): {symbol: dollars}, > 0 buy, < 0 sell, absent = leave it.
+    The backtester and paper trading (coordinator.trading.plan_orders) both size their
+    orders here, so they always agree. Both pass only symbols that can trade now.
+
+    - Not held, now wanted: buy the target, if it is at least MIN_TRADE_DOLLARS.
+    - Held, no longer wanted: sell all of it, however small (exactly -held[symbol]).
+    - Held and still wanted: resize to the target only when the gap is at least
+      max(MIN_TRADE_DOLLARS, REBALANCE_BAND x target), so price drift alone does not
+      trade. A position whose target shrinks a lot (held $1,000, target $300) is trimmed.
+    - Caps: a held position never gets a buy past its target, and when this
+      decision's buys would take the positions past the model's budget (most in total,
+      or the money it has), the trims the band held back are made after all (as long
+      as each is at least MIN_TRADE_DOLLARS), so buys never spend past the cap.
+    """
+    wanted = _cap_targets(weights, equity, limits, reserved)
+    trades: dict[str, float] = {}
+    held_back: dict[str, float] = {}
+    for symbol in set(held) | set(wanted):
+        have, want = held.get(symbol, 0.0), wanted.get(symbol, 0.0)
+        if want <= 0.0:
+            if have > 0.0:
+                trades[symbol] = -have  # sell out entirely
+        elif have <= 0.0:
+            if want >= MIN_TRADE_DOLLARS:
+                trades[symbol] = want  # a new position
+        elif abs(want - have) >= max(MIN_TRADE_DOLLARS, REBALANCE_BAND * want):
+            trades[symbol] = want - have
+        elif have - want >= MIN_TRADE_DOLLARS:
+            held_back[symbol] = want - have  # a trim inside the band
+    if held_back and any(d > 0 for d in trades.values()):
+        after = sum(held.values()) + sum(trades.values())
+        if after > _budget(equity, limits, reserved):
+            trades.update(held_back)
+    return trades
 
 
 def run_backtest(
@@ -183,21 +236,15 @@ def run_backtest(
             tradable = {s for s in rows if not np.isnan(data.open[rows[s], i]) and data.open[rows[s], i] > 0}
             stuck = sum(qty * np.nan_to_num(value_px[rows[s], i - 1] if i > 0 else 0.0)
                         for s, qty in shares.items() if s not in tradable)
-            wanted = _cap_targets({s: w for s, w in weights.items() if s in tradable}, prev_equity, limits, stuck)
+            # A held symbol with no bar now is left alone (stuck): try again at the next decision.
+            held = {s: qty * data.open[rows[s], i] for s, qty in shares.items() if s in tradable}
+            orders = rebalance_trades(held, {s: w for s, w in weights.items() if s in tradable},
+                                      prev_equity, limits, stuck)
             t = int(data.times[i])
-            orders = []
-            for symbol in set(shares) | set(wanted):
-                px = data.open[rows[symbol], i]
-                if np.isnan(px) or px <= 0:
-                    continue  # no bar for this symbol now: try again at the next decision
-                held = shares.get(symbol, 0.0) * px
-                delta = wanted.get(symbol, 0.0) - held
-                if wanted.get(symbol, 0.0) == 0.0 and held > 0:
-                    orders.append((symbol, -held * 2, px))  # sell everything
-                elif abs(delta) >= MIN_TRADE_DOLLARS:
-                    orders.append((symbol, delta, px))
-            for symbol, delta, px in sorted(orders, key=lambda o: o[1]):  # sells first, then buys
-                fill(symbol, delta, px, t)
+            for symbol, delta in sorted(orders.items(), key=lambda o: (o[1], o[0])):  # sells first, then buys
+                if delta <= -held.get(symbol, 0.0):
+                    delta *= 2  # sell everything (fill() never sells more than is held)
+                fill(symbol, delta, data.open[rows[symbol], i], t)
         equity[i - start] = marked(i)
         if should_stop is not None and should_stop():
             raise JobStopped()
