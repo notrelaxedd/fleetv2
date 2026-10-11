@@ -332,12 +332,51 @@ def test_the_worst_case_is_the_prompt_plus_a_whole_answer(conn):
     assert a.worst_cost(row, context) == pytest.approx((prompt * 4 + 16000 * 20) / 1e6)
 
 
-def test_a_replayed_article_over_the_cap_keeps_its_status(conn):
-    haiku.record_call(conn, "news", "claude-opus-5-5", 0, 0, 5.0, "ok", at=NOW)
+def test_a_replayed_article_over_the_monthly_cap_keeps_its_status(conn):
+    haiku.record_call(conn, "recipes", "claude-haiku-5-5", 0, 0, 49.90, "ok", at=NOW - timedelta(days=3))
     row = add_news(conn, status="backfill")
     client = FakeClient()
     assert run(conn, client, row, source="replay") == []
     assert client.requests == [] and status(conn)["analysis_status"] == "backfill"
+
+
+def test_a_replay_does_not_use_the_live_daily_cap(conn):
+    haiku.record_call(conn, "news", "claude-opus-5-5", 0, 0, 4.99, "ok", at=NOW - timedelta(hours=1))
+    row = add_news(conn, status="backfill")
+    client = FakeClient()
+    assert run(conn, client, row, source="replay") != [] and len(client.requests) == 1
+    # the same state stops a live call
+    live = add_news(conn, news_id=2)
+    assert run(conn, FakeClient(), live) == [] and status(conn, 2)["analysis_status"] == "over_budget"
+
+
+def test_a_replay_is_recorded_as_news_replay_and_does_not_count_as_the_live_day(conn):
+    run(conn, FakeClient(), add_news(conn, status="backfill"), source="replay")
+    call = conn.execute("SELECT * FROM ai_calls").fetchone()
+    assert call["feature"] == "news_replay" and call["cost_usd"] > 0 and call["detail"]["source"] == "replay"
+    assert research.spent_today(conn, NOW) == 0.0       # the live daily spend is unchanged
+    assert haiku.month_spend(conn, NOW) == pytest.approx(call["cost_usd"])   # the month sees it
+
+
+def test_a_replay_counts_its_spend_at_the_real_time_not_the_articles(conn):
+    """decided_at is months ago; the money is spent now, so the month's cap must see it."""
+    decided = NOW - timedelta(days=60)
+    row = add_news(conn, status="backfill", created_at=decided - timedelta(minutes=5))
+    context = research.build_context(conn, row, decided, None)
+    research.analyse_article(conn, analyst(FakeClient()), row, context, decided, "replay", clock=NOW)
+    assert haiku.month_spend(conn, NOW) > 0
+    assert conn.execute("SELECT at FROM ai_calls").fetchone()["at"] == NOW
+    assert conn.execute("SELECT decided_at FROM news_predictions").fetchone()["decided_at"] == decided
+    # and the monthly cap is checked against that month too
+    haiku.record_call(conn, "recipes", "m", 0, 0, 49.90, "ok", at=NOW)
+    again = add_news(conn, news_id=2, status="backfill", created_at=decided - timedelta(minutes=5))
+    ctx = research.build_context(conn, again, decided, None)
+    assert research.analyse_article(conn, analyst(FakeClient()), again, ctx, decided, "replay", clock=NOW) == []
+
+
+def test_a_live_call_is_recorded_as_news(conn):
+    run(conn, FakeClient())
+    assert conn.execute("SELECT feature FROM ai_calls").fetchone()["feature"] == "news"
 
 
 def test_a_replay_is_saved_as_a_replay(conn):

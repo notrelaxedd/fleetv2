@@ -17,11 +17,14 @@ what was known when it decided, and that nothing it answers is trusted unchecked
   whose symbols are exactly the article's own, and every prediction is checked again
   here: an unknown or repeated symbol, or a value out of range, is dropped, never
   guessed at.
-- Spending is capped twice, before every call, at the most the call could cost: the
-  news engine's own daily cap and the monthly cap shared by every AI feature
-  (config/ai.toml). Every call made is recorded in ai_calls (feature "news"). Problems
-  (a refused key, a busy server, a refusal, a cut-off answer) become a failed analysis,
-  never a crash.
+- Spending is capped before every call, at the most the call could cost. Live news has
+  two caps: the news engine's own daily cap and the monthly cap shared by every AI
+  feature (config/ai.toml). A replay (coordinator/news_replay.py) is a deliberate,
+  owner-run spend of months of news, limited by the owner's --max-usd, so it skips the
+  daily cap but still counts against the monthly one. Every call made is recorded in
+  ai_calls: feature "news" for live calls (that is the live daily spend, spent_today)
+  and "news_replay" for replayed ones. Problems (a refused key, a busy server, a
+  refusal, a cut-off answer) become a failed analysis, never a crash.
 
 The analyst itself (ClaudeAnalyst, or FakeAnalyst in demo mode) never touches the
 database: analyse_article checks the caps, makes the call through it and records
@@ -47,7 +50,8 @@ from fleet2 import universe
 
 log = logging.getLogger(__name__)
 
-FEATURE = "news"
+FEATURE = "news"                # ai_calls feature of live calls (counted by the daily cap)
+REPLAY_FEATURE = "news_replay"  # ai_calls feature of replayed calls (monthly cap only)
 PROMPT_VERSION = "news-v1"  # bump on every change to SYSTEM, the user message or the schema
 DIRECTIONS = ("up", "down", "none")
 MAX_PER_STEP = 5            # articles analysed per analyse_pending call
@@ -558,7 +562,8 @@ def build_context(conn: psycopg.Connection, article_row: dict[str, Any], now: da
 
 
 def spent_today(conn: psycopg.Connection, now: datetime) -> float:
-    """What the news engine's calls cost this UTC day."""
+    """What the live news engine's calls cost this UTC day (feature "news" only: replay
+    calls are "news_replay", so a replay never eats into, or shows up in, the live day)."""
     start = now.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     row = conn.execute("SELECT coalesce(sum(cost_usd), 0) AS s FROM ai_calls WHERE feature = %s "
                        "AND at >= %s AND at < %s", (FEATURE, start, start + timedelta(days=1))).fetchone()
@@ -566,12 +571,15 @@ def spent_today(conn: psycopg.Connection, now: datetime) -> float:
 
 
 def budget_problem(conn: psycopg.Connection, analyst: Any, settings: AiSettings, article_row: dict[str, Any],
-                   context: dict[str, Any], now: datetime) -> str | None:
-    """Which cap a call about this article would break, in plain words, or None."""
+                   context: dict[str, Any], now: datetime, source: str = "live") -> str | None:
+    """Which cap a call about this article would break, in plain words, or None.
+    `now` is the real clock (the spend windows are today and this month), never a
+    replayed article's time. The daily cap applies to live calls only; the monthly cap
+    to both."""
     worst = float(analyst.worst_cost(article_row, context))
     if worst <= 0:
         return None  # a free analyst (demo mode)
-    if spent_today(conn, now) + worst > settings.news_daily_cap_usd:
+    if source == "live" and spent_today(conn, now) + worst > settings.news_daily_cap_usd:
         return (f"today's news cap of ${settings.news_daily_cap_usd:,.2f} (daily_cap_usd in config/ai.toml [news]) "
                 "is reached")
     if haiku.month_spend(conn, now) + worst > settings.monthly_cap_usd:
@@ -597,11 +605,20 @@ def _set_status(conn: psycopg.Connection, news_id: int, status: str, note: str) 
 
 
 def analyse_article(conn: psycopg.Connection, analyst: Any, article_row: dict[str, Any], context: dict[str, Any],
-                    now: datetime, source: str = "live", settings: AiSettings | None = None) -> list[dict[str, Any]]:
+                    now: datetime, source: str = "live", settings: AiSettings | None = None,
+                    clock: datetime | None = None) -> list[dict[str, Any]]:
     """Have the analyst read one article and save what it said. Returns the saved
-    news_predictions rows. Checks both spending caps first: over either, no call is made
+    news_predictions rows. `now` is the decision time (saved as decided_at). `clock` is
+    the real time of the call, for the spending caps and the ai_calls record; it is
+    `now` unless given. A replay passes it, because there `now` is months ago and the
+    month's cap must count the money spent today.
+
+    Caps are checked first, at the most the call could cost. A live call needs room under
+    the daily news cap and the monthly cap; a replay (source "replay") only under the
+    monthly cap, its own limit being the owner's --max-usd. Over a cap, no call is made
     and a live article is marked over_budget (a replayed one keeps its status, so it
-    can be replayed later). Never raises for an API problem."""
+    can be replayed later). Live calls are recorded in ai_calls as feature "news",
+    replayed ones as "news_replay". Never raises for an API problem."""
     if source not in ("live", "replay"):
         raise ValueError(f"unknown source {source!r}")
     news_id = int(article_row["id"])
@@ -609,7 +626,8 @@ def analyse_article(conn: psycopg.Connection, analyst: Any, article_row: dict[st
         _set_status(conn, news_id, "skipped", "names none of our symbols")
         return []
     settings = settings or getattr(analyst, "settings", None) or AiSettings()
-    capped = budget_problem(conn, analyst, settings, article_row, context, now)
+    clock = clock or now
+    capped = budget_problem(conn, analyst, settings, article_row, context, clock, source)
     if capped:
         if source == "live":
             _set_status(conn, news_id, "over_budget", f"not analysed: {capped}")
@@ -629,11 +647,11 @@ def analyse_article(conn: psycopg.Connection, analyst: Any, article_row: dict[st
         call_id = None
         if result.made_call:
             call_id = haiku.record_call(
-                conn, FEATURE, result.served_model,
+                conn, FEATURE if source == "live" else REPLAY_FEATURE, result.served_model,
                 result.input_tokens + result.cache_read_tokens + result.cache_write_tokens, result.output_tokens,
                 result.cost_usd, _outcome(result),
                 detail={"news_id": news_id, "source": source, "requested_model": result.requested_model,
-                        "kept": len(result.predictions), "dropped": result.dropped[:20]}, at=now)
+                        "kept": len(result.predictions), "dropped": result.dropped[:20]}, at=clock)
         analysis = conn.execute(
             "INSERT INTO news_analyses (news_id, source, ai_call_id, requested_model, served_model, prompt_version, "
             "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, stop_reason, context, raw, "
@@ -641,7 +659,7 @@ def analyse_article(conn: psycopg.Connection, analyst: Any, article_row: dict[st
             (news_id, source, call_id, result.requested_model, result.served_model, result.prompt_version,
              result.input_tokens, result.output_tokens, result.cache_read_tokens, result.cache_write_tokens,
              result.cost_usd, result.stop_reason, Jsonb(context), Jsonb(result.raw) if result.raw else None,
-             result.error, now)).fetchone()
+             result.error, clock)).fetchone()
         saved = []
         for p in ([] if result.error else result.predictions):
             price = (context.get("symbols", {}).get(p.symbol) or {}).get("price_now")
