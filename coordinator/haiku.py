@@ -1,6 +1,8 @@
 """Claude Haiku on the coordinator: settings, the spending cap, and one way to ask
 (docs/AI_PLAN.md). Used by the recipe writer (ai_ideas), the model reviews (ai_reviews)
-and the daily market note (market_note).
+and the daily market note (market_note). The news engine (research, docs/NEWS_PLAN.md)
+reads its own settings from the [news] section and records its calls in ai_calls too,
+so they count against the same monthly cap.
 
 ask() is the only place that calls Anthropic. Before a call it adds the most the call
 could cost (its prompt, plus max_tokens of answer, at the prices in config/ai.toml) to
@@ -59,6 +61,15 @@ class AiSettings:
     # [prices]
     input_per_million: float = 0.10
     output_per_million: float = 0.50
+    # [news] Claude Opus reading the market news (docs/NEWS_PLAN.md)
+    news_enabled: bool = True
+    news_model: str = "claude-opus-5-5"
+    news_effort: str = "medium"
+    news_max_tokens: int = 16000
+    news_daily_cap_usd: float = 5.0
+    news_max_article_age_hours: float = 6.0
+    news_input_per_million: float = 4.00
+    news_output_per_million: float = 20.00
 
     def cost(self, input_tokens: int, output_tokens: int) -> float:
         return (input_tokens * self.input_per_million + output_tokens * self.output_per_million) / 1e6
@@ -74,6 +85,10 @@ _RENAMED = {
                 "effort": "review_effort", "max_tokens": "review_max_tokens"},
     "market_note": {"enabled": "note_enabled", "time": "note_time", "headlines": "note_headlines",
                     "effort": "note_effort", "max_tokens": "note_max_tokens"},
+    "news": {"enabled": "news_enabled", "model": "news_model", "effort": "news_effort",
+             "max_tokens": "news_max_tokens", "daily_cap_usd": "news_daily_cap_usd",
+             "max_article_age_hours": "news_max_article_age_hours",
+             "input_per_million": "news_input_per_million", "output_per_million": "news_output_per_million"},
 }
 
 
@@ -92,11 +107,13 @@ def load_settings(path: Path) -> AiSettings:
                 flat[names[key]] = value
     known = {f.name for f in fields(AiSettings)}
     s = AiSettings(**{k: v for k, v in flat.items() if k in known})
-    for name in ("effort", "review_effort", "note_effort"):
+    for name in ("effort", "review_effort", "note_effort", "news_effort"):
         if getattr(s, name) not in EFFORTS:
             raise ValueError(f"{name} in {path} must be one of {', '.join(EFFORTS)}")
-    if min(s.monthly_cap_usd, s.input_per_million, s.output_per_million) < 0 or \
-            min(s.per_call, s.max_tokens, s.review_max_tokens, s.note_max_tokens) < 1:
+    if min(s.monthly_cap_usd, s.input_per_million, s.output_per_million, s.news_daily_cap_usd,
+           s.news_input_per_million, s.news_output_per_million) < 0 or \
+            min(s.per_call, s.max_tokens, s.review_max_tokens, s.note_max_tokens, s.news_max_tokens) < 1 or \
+            s.news_max_article_age_hours <= 0:
         raise ValueError(f"the numbers in {path} must be positive")
     try:
         hh, mm = (int(x) for x in s.note_time.split(":"))
