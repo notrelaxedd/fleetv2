@@ -7,8 +7,8 @@ its own transaction; one failing never stops the others):
 - price data: keep the bars fresh for markets that have a model paper trading
   (crypto every hour, stocks every few hours), so workers decide on current data, and
   for markets with news predictions waiting to be scored
-- news trading: open and close the news strategies' positions (after the models'
-  own orders, on this same thread, so fills are never booked by two threads at once)
+- news trading: open and close the news strategies' positions (its own task after the
+  models' orders, on this same thread, so fills are never booked by two threads at once)
 - news scoring: score predictions whose horizon has passed, every few minutes
 
 make_news_tasks() is the news engine's own loop (a second thread): fetch new articles
@@ -52,6 +52,13 @@ def make_tasks(status: BrokerStatus, limits: Limits, bar_source: Any) -> tuple[C
         with pool.connection() as conn:
             trading.poll_fills(conn, status)
             trading.execute_pass(conn, status, limits)
+
+    def trade_news(pool: ConnectionPool) -> None:
+        # Its own task, so a failure in the models' executor never stops news stops and
+        # covers from being watched. Same thread, so fills are still booked by one thread.
+        if not status.broker.connected:
+            return
+        with pool.connection() as conn:
             news_trading.news_pass(conn, status, limits, bar_source.latest_prices, datetime.now(timezone.utc))
 
     def score_news(pool: ConnectionPool) -> None:
@@ -76,7 +83,7 @@ def make_tasks(status: BrokerStatus, limits: Limits, bar_source: Any) -> tuple[C
             last_refresh[market] = now
             refresh_market(pool, bar_source, market)
 
-    return (broker_status, daily_loss, trade, fresh_prices, score_news)
+    return (broker_status, daily_loss, trade, trade_news, fresh_prices, score_news)
 
 
 def make_news_tasks(news_source: Any, analyst: Any, settings: Any, bar_source: Any) -> tuple[Callable[[ConnectionPool], None], ...]:
