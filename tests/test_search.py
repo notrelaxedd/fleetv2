@@ -12,23 +12,39 @@ from tests.test_lookahead import synthetic
 
 
 def test_candidates_are_repeatable_and_inside_the_search_space():
-    a = search_job.candidate(42, 1, "momentum", 3)
-    assert a == search_job.candidate(42, 1, "momentum", 3)
-    assert a != search_job.candidate(42, 1, "momentum", 4)
-    assert a != search_job.candidate(43, 1, "momentum", 3)
+    a = search_job.candidates(42, 1, "momentum", 4, [])
+    assert a == search_job.candidates(42, 1, "momentum", 4, [])
+    assert len({tuple(sorted(c.items())) for c in a}) == 4  # no two alike
+    assert a != search_job.candidates(42, 2, "momentum", 4, [])
+    assert a != search_job.candidates(43, 1, "momentum", 4, [])
     from fleet2.models import momentum
-    for key, (low, high, _) in momentum.SEARCH_SPACE.items():
-        assert low <= a[key] <= high
+    for c in a:
+        assert set(c) == set(momentum.DEFAULT_PARAMS)
+        for key, (low, high, _) in momentum.SEARCH_SPACE.items():
+            assert low <= c[key] <= high
 
 
-def test_score_shrinks_results_from_few_trades():
-    assert search_job.score({"roi": 0.2, "trades": 100}) == pytest.approx(0.1)
-    assert search_job.score({"roi": 0.2, "trades": 10}) < search_job.score({"roi": 0.1, "trades": 1000})
+def test_candidates_are_ranked_by_return_over_buy_and_hold_with_enough_trades():
+    from fleet2.sim import robust
+
+    assert search_job.rejection({"trades": 99}, 0.5) == "too_few_trades"
+    assert search_job.rejection({"trades": 150}, 0.0) == "not_positive"
+    assert search_job.rejection({"trades": 150}, 0.01) is None
+    # the score is robust.score: more trades alone never raise it
+    few = {"roi": 0.2, "benchmark_roi": 0.1, "years": 1.0, "trades": 100}
+    many = {**few, "trades": 1000}
+    assert robust.score(few) == robust.score(many) == pytest.approx(0.1)
+
+
+def fake_report(data, module, params, start, stop, limits, should_stop, **kw):
+    return {"score": 0.05, "folds": [], "trades": 120, "positive_folds": 4, "neighbours": {}, "cost_stress": {},
+            "coin_flip": {}, "flags": [], "passed": True, "start": start, "stop": stop}
 
 
 def test_a_search_round_chooses_on_training_only_and_reports_held_out(monkeypatch):
     data = {"stocks": synthetic("stocks", 900, seed=5), "crypto": synthetic("crypto", 2400, seed=6)}
     monkeypatch.setattr(search_job, "load", lambda ctx, market: data[market])
+    monkeypatch.setattr(search_job.robust, "report", fake_report)
     seen_periods = []
     real_evaluate = search_job.evaluate
 
@@ -38,7 +54,15 @@ def test_a_search_round_chooses_on_training_only_and_reports_held_out(monkeypatc
 
     monkeypatch.setattr(search_job, "evaluate", spy)
     posted = []
-    monkeypatch.setattr(search_job.http, "post_json", lambda url, body, token=None, timeout=None: posted.append(body) or {"kept": True})
+
+    def post(url, body, token=None, timeout=None):
+        if url.endswith("/api/v1/search/log"):
+            return {"stored": len(body["trials"])}
+        posted.append(body)
+        return {"kept": True}
+
+    monkeypatch.setattr(search_job.http, "post_json", post)
+    monkeypatch.setattr(search_job.http, "get_json", lambda url, token=None, timeout=None: {"trials": []})
     rounds = []
 
     def emit(cp, progress, detail):
@@ -52,8 +76,11 @@ def test_a_search_round_chooses_on_training_only_and_reports_held_out(monkeypatc
     assert seen_periods.count("held_out") == len(posted)
     for body in posted:
         train, held = body["metrics"]["train"], body["metrics"]["held_out"]
-        assert train["trades"] >= 100 and body["train_score"] > 0
+        assert train["trades"] >= 100 and body["metrics"]["search_score"] > 0
+        assert body["train_score"] == body["metrics"]["robustness"]["score"] == 0.05
         assert held["start"] >= body["metrics"]["split_t"] > train["end"]
+        stop = body["metrics"]["robustness"]["stop"]
+        assert int(data[body["metrics"]["market"]].times[stop]) == body["metrics"]["split_t"]  # training bars only
 
 
 def test_the_coordinator_keeps_at_most_five_per_file_and_only_better_ones(client, conn):
