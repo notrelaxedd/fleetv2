@@ -190,6 +190,24 @@ def test_haiku_is_shown_training_numbers_only(conn):
     assert "held" not in text.lower() and "lockbox" not in text.lower() and "pass rate" not in text.lower()
 
 
+def test_haiku_sees_the_training_combine_numbers(conn):
+    job = futures_search(conn)
+    r = R.random_recipe(random.Random("combines"))
+    entry = {"name": R.name_of(r), "recipe": r, "tried": 16, "best_score": 0.12, "passes": True, "days_traded": 140,
+             "pnl_double": 812.5, "pnl_normal": 1404.0, "combine_score": -96.4, "combine_measure": "net_per_attempt",
+             "best_size": 2, "pass_rate": 0.18, "timeout_rate": 0.61}
+    assert ai_ideas.record_results(conn, job, [entry]) == 1
+    worse = {**entry, "best_score": 0.2, "combine_score": -140.0, "best_size": 1, "tried": 4}
+    ai_ideas.record_results(conn, job, [worse])  # a better Sharpe score, a worse Combine: each kept on its own
+    stored = conn.execute("SELECT result FROM recipe_ideas").fetchone()["result"]
+    assert stored["best_score"] == 0.2 and stored["combine_score"] == -96.4 and stored["best_size"] == 2
+    client = FakeClient()
+    write(conn, client)
+    text = client.requests[0]["messages"][0]["content"]
+    assert "training Combines: -$96 per attempt at 2 contracts, 18% passed, 61% ran out of time" in text
+    assert "held" not in text.lower() and "lockbox" not in text.lower()
+
+
 def test_results_mark_haiku_recipes_tried_and_keep_random_ones_up_to_date(conn):
     job = futures_search(conn)
     write(conn, FakeClient())

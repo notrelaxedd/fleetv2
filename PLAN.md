@@ -47,7 +47,9 @@ v1 source read: `notrelaxedd/polymarket-fleet` @ 9c5485a, cloned read-only to
   - Each model family has `search_space(rng)`, which draws one random set of parameters.
   - Candidate `i` uses `random.Random(f"{seed}:{i}")`, so a resumed job repeats exactly.
 - Each candidate is backtested on the search era and ranked by "shrunk ROI"
-  (`roi * n/(n+100)`). The best 5 are kept.
+  (`roi * n/(n+100)`). The best 5 are kept. v2 no longer uses this: it scores on
+  training prices only (yearly return over buy and hold's, the worst of four parts) and
+  learns from a search log; see README "Start model search".
 - The 5 kept candidates are then re-run once on a held-out validation era that the
   search never saw (`fleet/sim/validate.py`). They also get stress tests (worse costs,
   nudged parameters) and the flags overfit, fragile and regime_dependent

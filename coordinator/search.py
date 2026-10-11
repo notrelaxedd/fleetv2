@@ -8,8 +8,9 @@ settings. A futures search also gives each worker its own share of the strategie
 
 Found models are kept sparingly so the list stays readable: at most KEEP_PER_FILE
 search models per model file stay active. A new find replaces the weakest one only when
-its TRAINING score is higher; held-out results never decide what is kept (they are for
-ranking on the Models screen).
+it is better: a stock or crypto model that failed the robustness checks is weaker than
+any that passed them, and otherwise the higher TRAINING score wins (store_found);
+held-out results never decide what is kept (they are for ranking on the Models screen).
 
 The search log (table search_log) holds every setting a search tried, kept or not, with
 its TRAINING score and why it was rejected, so the searches can learn from their mistakes
@@ -174,21 +175,32 @@ def _shares(conn: psycopg.Connection, jobs: list[dict[str, Any]]) -> list[str]:
 
 def store_found(conn: psycopg.Connection, worker_id: str, body: dict[str, Any]) -> dict[str, Any]:
     """A model a search job found. Kept unless the file already has KEEP_PER_FILE better
-    finds (by training score); then it replaces the weakest of them or is dropped."""
+    finds; then it replaces the weakest of them or is dropped.
+
+    Better: a model that passed the robustness checks (metrics.robustness.passed; a model
+    without the block, from before them, counts as passed) beats every model that failed
+    them, whatever their training scores; among models alike in that, the higher
+    TRAINING score is better. So a model that failed the checks only ever replaces a
+    weaker one that failed them too, and never pushes out one that passed."""
     module_name = str(body["module"])
     module = get_module(module_name)
     score = float(body["train_score"])
+    failed = _failed_robustness(body.get("metrics"))
     others = conn.execute(
         """
-        SELECT id, (metrics->>'train_score')::float AS score FROM models
+        SELECT id, (metrics->>'train_score')::float AS score,
+               coalesce(metrics->'robustness'->'passed' = 'false'::jsonb, false) AS failed
+          FROM models
          WHERE origin = 'search' AND module = %s AND status = 'backtested'
-         ORDER BY score ASC NULLS FIRST
+         ORDER BY failed DESC, score ASC NULLS FIRST
         """,
         (module_name,),
     ).fetchall()
     if len(others) >= KEEP_PER_FILE:
         weakest = others[0]
-        if weakest["score"] is not None and weakest["score"] >= score:
+        if failed and not weakest["failed"]:
+            return {"kept": False, "reason": "failed the robustness checks, and the models already kept passed them"}
+        if failed == weakest["failed"] and weakest["score"] is not None and weakest["score"] >= score:
             return {"kept": False, "reason": "not better than the models already kept"}
         conn.execute("UPDATE models SET status = 'retired' WHERE id = %s", (weakest["id"],))
     n = conn.execute("SELECT count(*) AS n FROM models WHERE module = %s AND origin = 'search'", (module_name,)).fetchone()["n"] + 1
@@ -207,6 +219,13 @@ def store_found(conn: psycopg.Connection, worker_id: str, body: dict[str, Any]) 
          Jsonb(body["params"]), Jsonb(metrics)),
     )
     return {"kept": True, "id": model_id}
+
+
+def _failed_robustness(metrics: Any) -> bool:
+    """True when the metrics hold a robustness report that did not pass (as the Models
+    screen reads it: no report means no verdict, not a failure)."""
+    block = metrics.get("robustness") if isinstance(metrics, dict) else None
+    return isinstance(block, dict) and block.get("passed") is False
 
 
 # ------------------------------------------------------------------ the search log

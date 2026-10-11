@@ -75,6 +75,7 @@
     var id = screen.getAttribute("data-selected-id");
     var query = [];
     if (screen.getAttribute("data-market")) { query.push("market=" + encodeURIComponent(screen.getAttribute("data-market"))); }
+    if (screen.getAttribute("data-all")) { query.push("all=1"); }
     if (id) { query.push("id=" + encodeURIComponent(id)); }
     return "/fragments/models" + (query.length ? "?" + query.join("&") : "");
   }

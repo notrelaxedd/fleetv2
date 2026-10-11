@@ -8,6 +8,7 @@ from __future__ import annotations
 import random
 from dataclasses import replace
 from datetime import date
+from urllib.parse import parse_qs, urlsplit
 
 import numpy as np
 import pytest
@@ -137,16 +138,18 @@ def test_the_gates(full, periods, monkeypatch):
 # ------------------------------------------------------------------ proposals
 
 
-def test_proposals_are_half_random_half_changes_to_kept_models():
+def test_proposals_are_half_new_half_changes_to_kept_models():
     kept = [{"id": "pullback-s1", "params": params_with_defaults(REGISTRY["pullback"], {"trend": 0.5})},
             {"id": "pullback-s2", "params": params_with_defaults(REGISTRY["pullback"], {"dip": 0.3})}]
-    props = fs.proposals(77, 3, "pullback", 8, kept)
-    random_ones = [p for p in props if p["parent"] is None]
+    props = fs.proposals(77, 3, "pullback", 8, kept, trials=[])
+    new = [p for p in props if p["parent"] is None]
     changes = [p for p in props if p["parent"]]
-    assert len(random_ones) == 4 and len(changes) == 4
-    assert [p["seed"] for p in random_ones] == [f"77:3:pullback:{i}" for i in range(4)]
+    assert len(new) == 4 and len(changes) == 4
+    assert [p["seed"] for p in new] == [f"77:3:pullback:s{i}" for i in range(4)]  # the sampler's suggestions
     assert changes[0]["seed"] == "77:3:pullback:m0 parent=pullback-s1" and changes[1]["parent"] == "pullback-s2"
-    assert fs.proposals(77, 3, "pullback", 8, kept) == props  # the seed text re-creates every one
+    assert fs.proposals(77, 3, "pullback", 8, kept, trials=[]) == props  # the seed text (and log) re-create every one
+    for p in new:
+        assert set(p["params"]) == set(REGISTRY["pullback"].DEFAULT_PARAMS)  # defaults filled in
     for p in changes:  # a small change: every number within 15% (or one step) of the parent's
         parent = next(k for k in kept if k["id"] == p["parent"])["params"]
         for name, spec in REGISTRY["pullback"].SEARCH_SPACE.items():
@@ -154,35 +157,80 @@ def test_proposals_are_half_random_half_changes_to_kept_models():
                 step = max(abs(parent[name]) * 0.15, (spec[1] - spec[0]) * 0.02, 1 if spec[-1] == "int" else 0)
                 assert abs(p["params"][name] - parent[name]) <= step + 1e-9
                 assert spec[0] <= p["params"][name] <= spec[1]
-    assert all(p["parent"] is None for p in fs.proposals(77, 3, "pullback", 8, []))
+    assert all(p["parent"] is None for p in fs.proposals(77, 3, "pullback", 8, [], trials=[]))
+    # Without a history (a new recipe), new settings are draw_params of the old seed text.
+    plain = fs.proposals(77, 3, "pullback", 4, [])
+    assert [p["seed"] for p in plain] == [f"77:3:pullback:{i}" for i in range(4)]
+    assert plain[0]["params"] == fs.draw_params(REGISTRY["pullback"], random.Random("77:3:pullback:0"))
 
 
 # ------------------------------------------------------------------ robustness
 
 
+FLOOR = -150.0
+
+
 class FixedScorer:
-    def __init__(self, scores):
+    """Neighbour results with the given combine scores (None: failed a cheap gate)."""
+
+    def __init__(self, scores, sharpe=0.5):
         self.scores = scores
+        self.sharpe = sharpe
         self.seen = []
 
     def score(self, tasks, should_stop, progress=None):
         self.seen += tasks
-        return [{"score": s} for s in self.scores[: len(tasks)]]
+        return [{"score": self.sharpe, "combine_score": s, "combine": None if s is None else {"floor": FLOOR}}
+                for s in self.scores[: len(tasks)]]
 
 
-def test_a_sharp_peak_is_dropped():
-    winner = {"name": "pullback", "params": params_with_defaults(REGISTRY["pullback"], None), "seed": "1:1:pullback:0",
-              "parent": None, "score": 1.0}
+def peak(combine_score=-50.0):
+    return {"name": "pullback", "params": params_with_defaults(REGISTRY["pullback"], None), "seed": "1:1:pullback:0",
+            "parent": None, "score": 1.0, "combine_score": combine_score, "combine": {"floor": FLOOR}}
+
+
+def test_a_sharp_peak_is_dropped_measured_above_the_fee_floor():
+    winner = peak(-50.0)  # 100 above the floor
     n = len(fs.neighbours(REGISTRY["pullback"], winner["params"]))
     assert n >= 8  # two neighbours per numeric setting
-    ok, middle = fs.robust(FixedScorer([0.9] * n), winner, lambda: False)
-    assert ok and middle == pytest.approx(0.9)
-    ok, middle = fs.robust(FixedScorer([0.3] * (n - 2) + [2.0, 2.0]), winner, lambda: False)
-    assert not ok and middle == pytest.approx(0.3)  # the median neighbour scores under half of 1.0
-    scorer = FixedScorer([0.9] * n)
+    ok, middle, sharpe = fs.robust(FixedScorer([-90.0] * n), winner, lambda: False)
+    assert ok and middle == pytest.approx(-90.0) and sharpe == pytest.approx(0.5)  # 60 above: over half of 100
+    ok, middle, _ = fs.robust(FixedScorer([-110.0] * (n - 2) + [500.0, 500.0]), winner, lambda: False)
+    assert not ok and middle == pytest.approx(-110.0)  # the median neighbour keeps only 40 of 100 above the floor
+    ok, middle, _ = fs.robust(FixedScorer([None] * (n - 2) + [-50.0, -50.0]), winner, lambda: False)
+    assert not ok and middle == pytest.approx(FLOOR)  # a neighbour that failed the gates counts as the floor
+    # Measured from the floor, not from zero: half of a negative number would be a looser bar.
+    ok, _, _ = fs.robust(FixedScorer([-95.0] * n), peak(-140.0), lambda: False)
+    assert ok  # 55 above the floor against 10: fine
+    ok, _, _ = fs.robust(FixedScorer([-146.0] * n), peak(-140.0), lambda: False)
+    assert not ok  # 4 above against 10
+    scorer = FixedScorer([-90.0] * n)
     fs.robust(scorer, winner, lambda: False)
     moved = [next(k for k in t["params"] if t["params"][k] != winner["params"][k]) for t in scorer.seen]
     assert sorted(set(moved)) == sorted(k for k, s in REGISTRY["pullback"].SEARCH_SPACE.items() if s[-1] != "choice")
+
+
+def row(combine_score, passes=True, score=0.2, floor=FLOOR, gates=None):
+    gates = gates or {"days_traded": passes, "profit_double": True, "within_the_day": True, "profit_normal": True}
+    return {"name": "pullback", "params": {"bar_minutes": 5}, "seed": "x", "parent": None, "score": score,
+            "passes": passes, "gates": gates, "combine_score": combine_score,
+            "combine": None if combine_score is None else {"floor": floor, "best_size": 1, "sizes": [{"contracts": 1}]}}
+
+
+def test_the_winner_is_the_best_combine_score_above_the_floor():
+    rows = [row(-120.0, score=2.0), row(-80.0, score=0.1), row(-80.0, score=0.3), row(50.0, passes=False),
+            row(FLOOR, score=5.0)]
+    assert fs.winner_of(rows) is rows[2]  # -80 beats -120; the Sharpe score breaks the tie
+    assert fs.winner_of([row(FLOOR, score=3.0), row(FLOOR), row(None, passes=False)]) is None  # all at the floor
+    assert fs.winner_of([row(10.0, passes=False)]) is None  # the gates still come first
+    assert [fs.rejection(r) for r in rows] == [None, None, None, "gates:days_traded", "floor"]
+    assert fs.rejection({"error": "boom", "params": {}}) == "error"
+    assert fs.rejection(row(None)) == "no_combine"
+    trial = fs.log_trial(rows[3])
+    assert trial == {"params": {"bar_minutes": 5}, "score": 50.0, "rejected": "gates:days_traded",
+                     "metrics": {"score": 0.2, "sharpe": None, "days_traded": None, "pnl_double": None,
+                                 "pnl_normal": None, "combine": {"floor": FLOOR, "best_size": 1}}}
+    assert fs.log_trial(rows[2], "not_robust")["rejected"] == "not_robust"
 
 
 # ------------------------------------------------------------------ the process pool
@@ -224,12 +272,25 @@ class Coordinator:
         self.found: list[dict] = []
         self.tries: list[dict] = []
         self.recipes: list[list[dict]] = []
+        self.log: dict[str, list[dict]] = {}  # family: trials posted to the search log
+        self.log_reads: list[str] = []
 
     def get_json(self, url, token=None, timeout=None):
+        if "/api/v1/search/log?" in url:
+            query = parse_qs(urlsplit(url).query)
+            assert query["market"] == ["futures"]
+            family = query["family"][0]
+            self.log_reads.append(family)
+            trials = [{k: t[k] for k in ("params", "score", "rejected")} for t in self.log.get(family, [])]
+            return {"market": "futures", "family": family, "tried": len(trials), "trials": trials}
         assert url.endswith("/api/v1/models/kept?market=futures")
         return self.kept
 
     def post_json(self, url, body, token=None, timeout=None):
+        if url.endswith("/api/v1/search/log"):
+            assert body["market"] == "futures" and len(body["trials"]) <= 1000
+            self.log.setdefault(body["family"], []).extend(body["trials"])
+            return {"stored": len(body["trials"])}
         if url.endswith("/api/v1/search/tries"):
             self.tries.append(body["tries"])
             self.recipes.append(body.get("recipes") or [])
@@ -330,8 +391,8 @@ def test_the_search_uses_kept_models_as_parents(monkeypatch, full, periods):
     seen = []
     real = fs.proposals
 
-    def spy(seed, round_no, name, count, kept_for_file):
-        out = real(seed, round_no, name, count, kept_for_file)
+    def spy(seed, round_no, name, count, kept_for_file, *a, **k):
+        out = real(seed, round_no, name, count, kept_for_file, *a, **k)
         seen.extend(out)
         return out
 
@@ -384,7 +445,8 @@ def test_a_round_tries_haiku_recipes_beside_random_ones_and_reports_training_num
         assert entry["recipe"] == idea["recipe"]
     randoms = [r for r in reported if r["idea_id"] is None]
     assert len(randoms) == 1  # the round's one random recipe, beside them
-    allowed = {"name", "recipe", "idea_id", "tried", "best_score", "passes", "days_traded", "pnl_double", "pnl_normal"}
+    allowed = {"name", "recipe", "idea_id", "tried", "best_score", "passes", "days_traded", "pnl_double", "pnl_normal",
+               "combine_score", "combine_measure", "best_size", "pass_rate", "timeout_rate"}
     assert all(set(r) == allowed for r in reported)  # training numbers only, never held-out ones
     assert coordinator.tries[0]["recipe"]["n"] == 12
     for body in coordinator.found:

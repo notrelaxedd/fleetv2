@@ -485,3 +485,38 @@ def test_a_futures_search_on_three_workers_splits_the_strategies(client, conn, m
     html = client.get("/models?market=futures").text
     lines = re.findall(r"<li>(w\d: [^<]+)</li>", html)
     assert len(lines) == 3 and any(line.endswith(": recipes") for line in lines)
+
+
+# ------------------------------------------------------------------ only the most profitable are listed
+
+
+def copy_of(conn, source: str, model_id: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO models (id, name, module, market, description, how_it_works, params, status, origin, metrics)
+        SELECT %s, %s, module, market, description, how_it_works, params, status, 'search', metrics
+          FROM models WHERE id = %s
+        """, (model_id, f"Copy {model_id}", source))
+
+
+def test_the_list_shows_only_the_most_profitable_until_show_all(client, conn, fees):
+    starters = futures_ids(client.get("/models?market=futures").text)
+    for i in range(5):
+        copy_of(conn, "gap_fade", f"gap_fade-s{i + 1}")
+    ids = starters + [f"gap_fade-s{i + 1}" for i in range(5)]
+    for i, model_id in enumerate(ids):                 # net grows with i: the last one is the most profitable
+        store(conn, model_id, shaped(0.50, 0.30, 1_000.0 + 100.0 * i))
+    best_first = list(reversed(ids))
+    html = client.get("/models?market=futures").text
+    assert futures_ids(html) == best_first[:futures_view.SHOWN]
+    assert element(html, "data-more").startswith(f"Showing the 10 most profitable of {len(ids)} futures models.")
+    assert "all=1" in html
+    every = client.get("/models?market=futures&all=1").text
+    assert futures_ids(every) == best_first and "data-show-top" in every
+    # a model outside the top 10 still opens from a link, listed after them
+    low = best_first[-1]
+    linked = client.get(f"/models?market=futures&id={low}").text
+    assert futures_ids(linked) == best_first[:futures_view.SHOWN] + [low]
+    assert 'data-selected="true"' in linked.split(f'data-model="{low}"')[1].split(">")[0]
+    fragment = client.get("/fragments/models?market=futures&all=1").text
+    assert futures_ids(fragment) == best_first

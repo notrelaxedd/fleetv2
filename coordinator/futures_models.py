@@ -14,7 +14,9 @@ see fleet2/models/futures/recipe.py):
   higher), and while fewer than KEEP_RECIPES recipe models are kept in all (with that
   many it replaces the lowest-scoring one, when it scores higher). So one good recipe
   cannot fill every place with variations of itself.
-Training scores decide; held-out results never do (they are for ranking).
+Training scores decide; held-out results never do (they are for ranking). "Scores
+higher" is keep_rank: the training Combine score first (what the search picks winners
+by), then the training Sharpe score.
 
 No order is ever placed for a futures model: they cannot paper trade (trading.start
 refuses), and nothing here talks to a broker.
@@ -78,12 +80,12 @@ def retire_old_files(conn: psycopg.Connection) -> list[str]:
 
 
 def trim_recipes(conn: psycopg.Connection) -> list[str]:
-    """Retire the kept models of a recipe beyond its KEEP_PER_RECIPE best (by training
-    score), as the keep rules would have. A model that is trading or has a Final check
+    """Retire the kept models of a recipe beyond its KEEP_PER_RECIPE best (by keep_rank),
+    as the keep rules would have. A model that is trading or has a Final check
     is never retired. Returns the retired ids."""
     rows = conn.execute(
         """
-        SELECT m.id, m.module, (m.metrics->>'train_score')::float AS score,
+        SELECT m.id, m.module, m.metrics, (m.metrics->>'train_score')::float AS score,
                EXISTS (SELECT 1 FROM futures_books b WHERE b.model_id = m.id AND b.status IN ('active', 'closing'))
                OR EXISTS (SELECT 1 FROM final_checks f WHERE f.model_id = m.id) AS keep
           FROM models m
@@ -95,7 +97,7 @@ def trim_recipes(conn: psycopg.Connection) -> list[str]:
         by.setdefault(r["module"], []).append(r)
     retired: list[str] = []
     for family in by.values():
-        family.sort(key=lambda r: (not r["keep"], -(r["score"] if r["score"] is not None else float("-inf"))))
+        family.sort(key=lambda r: (r["keep"], keep_rank(r["metrics"], r["score"])), reverse=True)
         for r in family[KEEP_PER_RECIPE:]:
             if not r["keep"]:
                 retired.append(r["id"])
@@ -238,6 +240,19 @@ def distance(module: Any, a: dict[str, Any], b: dict[str, Any]) -> float:
     return total
 
 
+def keep_rank(metrics: dict[str, Any] | None, train_score: float | None) -> tuple[int, float, float]:
+    """How a kept futures model compares with another, best last: first whether its
+    training Combines beat the fee floor (the search picks winners that way), then that
+    training Combine score, then the training Sharpe score. Models found before the
+    Combine score existed rank below every model that has one."""
+    train = (metrics or {}).get("train") or {}
+    combine = train.get("combine_score")
+    floor = (train.get("combine") or {}).get("floor")
+    above = combine is not None and floor is not None and combine > floor
+    low = float("-inf")
+    return (1 if above else 0, float(combine) if above else low, float(train_score) if train_score is not None else low)
+
+
 def store_found(conn: psycopg.Connection, worker_id: str | None, body: dict[str, Any]) -> dict[str, Any]:
     """A futures model a search job found (see the module docstring for what is kept)."""
     name = str(body["module"])
@@ -249,13 +264,14 @@ def store_found(conn: psycopg.Connection, worker_id: str | None, body: dict[str,
     score = float(body["train_score"])
     metrics = dict(body["metrics"])
     mine = _daily(metrics)
+    rank = keep_rank(metrics, score)
     kept = conn.execute("SELECT id, name, module, params, metrics, (metrics->>'train_score')::float AS score "
                         "FROM models WHERE market = 'futures' AND origin = 'search' AND status = 'backtested'").fetchall()
     replace = None
     for other in kept:
         alike = correlation(mine, _daily(other["metrics"]))
         if alike is not None and alike > ALIKE:
-            if other["score"] is not None and other["score"] >= score:
+            if keep_rank(other["metrics"], other["score"]) >= rank:
                 return {"kept": False, "reason": f"trades like {other['name']} ({alike:.0%} alike), which scores higher"}
             replace = other
             break
@@ -264,13 +280,13 @@ def store_found(conn: psycopg.Connection, worker_id: str | None, body: dict[str,
         same = [k for k in recipes if k["module"] == name]
         if len(same) >= KEEP_PER_RECIPE:
             closest = min(same, key=lambda k: distance(module, params, k["params"]))
-            if closest["score"] is not None and closest["score"] >= score:
+            if keep_rank(closest["metrics"], closest["score"]) >= rank:
                 return {"kept": False, "reason": f"not better than the closest kept model of this recipe, "
                                                  f"{closest['name']}"}
             replace = closest
         elif len(recipes) >= KEEP_RECIPES:
-            weakest = min(recipes, key=lambda k: k["score"] if k["score"] is not None else float("-inf"))
-            if weakest["score"] is not None and weakest["score"] >= score:
+            weakest = min(recipes, key=lambda k: keep_rank(k["metrics"], k["score"]))
+            if keep_rank(weakest["metrics"], weakest["score"]) >= rank:
                 return {"kept": False, "reason": f"not better than the weakest of {KEEP_RECIPES} kept recipe models, "
                                                  f"{weakest['name']}"}
             replace = weakest
@@ -278,7 +294,7 @@ def store_found(conn: psycopg.Connection, worker_id: str | None, body: dict[str,
         same = [k for k in kept if k["module"] == name]
         if len(same) >= KEEP_PER_FILE:
             closest = min(same, key=lambda k: distance(module, params, k["params"]))
-            if closest["score"] is not None and closest["score"] >= score:
+            if keep_rank(closest["metrics"], closest["score"]) >= rank:
                 return {"kept": False, "reason": f"not better than the closest kept model, {closest['name']}"}
             replace = closest
     if replace is not None:

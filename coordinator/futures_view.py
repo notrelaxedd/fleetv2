@@ -27,6 +27,8 @@ from fleet2.models.futures import tries_bucket
 from fleet2.sim import futures_stats, topstep
 from fleet2.sim.cme_session import as_date
 
+SHOWN = 10  # futures models listed at once; "Show all" lists the rest
+
 FEED_TAG = {"databento": "Databento prices", "proxy": "Proxy prices", "synthetic": "Synthetic prices"}
 PAPER_NOTE = ("A futures model first paper trades on Alpaca (SPY or QQQ shares standing in for its contracts). "
               "Only once its checklist is complete can it trade on Topstep.")
@@ -556,10 +558,23 @@ def live_signals(conn: psycopg.Connection, now: datetime) -> list[dict[str, Any]
     return out
 
 
+def shown(rows: list[dict[str, Any]], chosen_id: str | None, show_all: bool) -> list[dict[str, Any]]:
+    """The rows the list shows: all of them with show_all; otherwise the SHOWN most
+    profitable (the ranking's order, retired models left out), plus the selected model
+    at the end when it is not among them, so a link to it still opens it."""
+    if show_all:
+        return rows
+    top = [r for r in rows if not r["retired"]][:SHOWN]
+    if chosen_id and all(r["id"] != chosen_id for r in top):
+        top += [r for r in rows if r["id"] == chosen_id]
+    return top
+
+
 def futures_page(conn: psycopg.Connection, rules: topstep.Rules, selected_id: str | None = None,
                  search: dict[str, Any] | None = None, venues: Any = None,
-                 now: datetime | None = None) -> dict[str, Any]:
-    """The futures list (ranked), the selected model and the prices and search panel."""
+                 now: datetime | None = None, show_all: bool = False) -> dict[str, Any]:
+    """The futures list (ranked; only the SHOWN most profitable unless show_all), the
+    selected model and the prices and search panel."""
     now = now or datetime.now(timezone.utc)
     models = [m for m in list_models(conn, include_retired=True) if m["market"] == "futures"]
     rows = ranked([list_row(m, rules) for m in models])
@@ -567,6 +582,7 @@ def futures_page(conn: psycopg.Connection, rules: topstep.Rules, selected_id: st
     chosen_id = selected_id if selected_id in by_id else (rows[0]["id"] if rows else None)
     for r in rows:
         r["selected"] = r["id"] == chosen_id
+    listed = shown(rows, chosen_id, show_all)
     prices = futures_data.status_line(conn)
     tries = futures_models.tries(conn)
     notice = None
@@ -587,7 +603,10 @@ def futures_page(conn: psycopg.Connection, rules: topstep.Rules, selected_id: st
     return {
         "view": "futures",
         "notice": notice,
-        "models": rows,
+        "models": listed,
+        "show_all": show_all,
+        "more": (f"Showing the {len([r for r in listed if not r['retired']][:SHOWN])} most profitable of "
+                 f"{len(rows)} futures models." if len(listed) < len(rows) else None),
         "selected": selected,
         "prices": prices,
         "fee_note": (f"{topstep.FEE_MESSAGE} ({', '.join(missing)}): futures backtests and model search need it."
