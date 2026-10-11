@@ -1,0 +1,37 @@
+{% for s in scores %}
+<article class="card nblock" data-score="{{ s.market }}">
+  <h3 class="ntitle">{{ s.name }}</h3>
+  <p class="ngate" data-gate data-ok="{{ 'true' if s.gate_ok else 'false' }}">{{ s.gate_reason }}</p>
+  <p class="muted small" data-source-counts>Scored so far: {{ s.live }} live (predicted before the price moved), {{ s.replay }} replay (older news replayed with only the prices known at the time).</p>
+  <div class="mcards five">
+  {% for c in s.cards %}
+    <article class="mcard" data-metric="{{ c.key }}" data-tone="{{ c.tone }}">
+      <h4 class="mlabel" data-label>{{ c.label }}</h4>
+      <p class="mvalue num" data-value>{{ c.value }}</p>
+      <p class="mdescr" data-description>{{ c.description }}</p>
+      {% if c.note %}<p class="mnote" data-note>{{ c.note }}</p>{% endif %}
+    </article>
+  {% endfor %}
+  </div>
+  <details class="ndetail" data-key="score-{{ s.market }}">
+    <summary>Up and down calls, and how sure Claude was</summary>
+    <div class="table-wrap">
+      <table class="jobs ntable">
+        <thead><tr><th>Kind of call</th><th>Scored</th><th>Right</th><th>Average result</th></tr></thead>
+        <tbody>
+        {% for d in s.detail.directions %}<tr><td>{{ d.label }}</td><td class="num">{{ d.n }}</td><td class="num">{{ d.hit }}</td><td class="num">{{ d.result }}</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="table-wrap">
+      <table class="jobs ntable">
+        <thead><tr><th>How sure Claude was</th><th>Scored</th><th>Right</th></tr></thead>
+        <tbody>
+        {% for c in s.detail.calibration %}<tr><td>{{ c.label }}</td><td class="num">{{ c.n }}</td><td class="num">{{ c.hit }}</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="muted small">If Claude knows when it is right, the more sure it was, the more often it was right.</p>
+  </details>
+</article>
+{% endfor %}

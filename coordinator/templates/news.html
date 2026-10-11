@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}News{% endblock %}
+{% block content %}
+<h1 class="sr-only">News</h1>
+<div class="news" data-news-screen>
+  <p class="muted nintro">Claude reads market news and predicts how each stock or coin it names will move. Every prediction is saved, then checked against what the price really did. Paper money is only used once Claude's predictions beat a coin flip.</p>
+  <section aria-labelledby="h-nstatus">
+    <h2 class="section" id="h-nstatus">Status</h2>
+    <div data-region="news-status">{% include "_news_status.html" %}</div>
+  </section>
+  <section aria-labelledby="h-nscores">
+    <h2 class="section" id="h-nscores">How good are the predictions?</h2>
+    <div data-region="news-scores">{% include "_news_scores.html" %}</div>
+  </section>
+  <section aria-labelledby="h-npaper">
+    <h2 class="section" id="h-npaper">Paper trading</h2>
+    <div data-region="news-paper">{% include "_news_paper.html" %}</div>
+    <p class="confirm" data-reply="news" role="status" aria-live="polite"></p>
+  </section>
+  <section aria-labelledby="h-nfeed">
+    <h2 class="section" id="h-nfeed">Latest articles and Claude's calls</h2>
+    <div data-region="news-feed">{% include "_news_feed.html" %}</div>
+  </section>
+</div>
+{% endblock %}

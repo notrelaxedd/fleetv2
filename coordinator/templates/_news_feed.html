@@ -1,0 +1,43 @@
+{% if not feed %}
+<p class="empty" data-no-news>No articles yet. Once the news feed is running, articles that name a stock or coin we trade appear here.</p>
+{% else %}
+<p class="muted small nintro">Newest first. Times are New York time. A score appears once the prediction's time has passed; the twin is the coin-flip trade it is compared with.</p>
+<ul class="nfeed" data-feed>
+{% for a in feed %}
+  <li class="card narticle" data-article="{{ a.id }}" data-analysis="{{ a.status }}">
+    <p class="nhead">
+      {% if a.url %}<a class="nlink" href="{{ a.url }}" rel="noopener noreferrer" target="_blank">{{ a.headline }}</a>{% else %}<span class="nlink">{{ a.headline }}</span>{% endif %}
+    </p>
+    <p class="muted small nmeta">
+      <span class="num" title="{{ a.ago }}">{{ a.time }}</span>
+      {% if a.source %}<span>{{ a.source }}</span>{% endif %}
+      {% for s in a.symbols %}<span class="tag" data-symbol>{{ s }}</span>{% endfor %}
+      <span class="tag{% if a.status in ('failed', 'over_budget') %} warn{% endif %}" data-analysis-status>{{ a.status_text }}</span>
+    </p>
+    {% if a.note %}<p class="muted small" data-analysis-note>{{ a.note }}</p>{% endif %}
+    {% for c in a.calls %}
+    <div class="ncall" data-call="{{ c.symbol }}" data-direction="{{ c.direction }}">
+      <p class="ncall-line">
+        <span class="num ncall-symbol">{{ c.symbol }}</span>
+        <span class="ndir" data-dir="{{ c.direction }}"><span aria-hidden="true">{{ c.arrow }}</span> <span data-dir-word>{{ c.word }}</span></span>
+        {% if c.move %}<span data-move>{{ c.move }}</span><span class="muted" data-confidence>{{ c.confidence }}</span>{% endif %}
+        {% if c.priced_in %}<span class="tag warn" data-priced-in>Already priced in</span>{% endif %}
+        {% if c.source == 'replay' %}<span class="tag" data-replay>Replay</span>{% endif %}
+      </p>
+      {% if c.score %}
+      <p class="small ncall-score" data-score-line data-tone="{{ c.score.tone }}">Result after costs <span class="num">{{ c.score.result }}</span> · {{ c.score.hit }} · coin-flip twin <span class="num">{{ c.score.twin }}</span></p>
+      {% elif c.direction != 'none' %}
+      <p class="muted small" data-score-line>{{ c.score_note or "Not scored yet." }}</p>
+      {% endif %}
+      {% if c.rationale %}
+      <details class="nwhy-details" data-key="call-{{ c.id }}">
+        <summary>Why Claude said so</summary>
+        <p class="small" data-rationale>{{ c.rationale }}</p>
+      </details>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </li>
+{% endfor %}
+</ul>
+{% endif %}

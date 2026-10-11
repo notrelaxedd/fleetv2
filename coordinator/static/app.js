@@ -54,13 +54,22 @@
         return;
       }
       var target = $('[data-region="' + name + '"]');
-      if (target && target.innerHTML !== fresh.innerHTML) { target.innerHTML = fresh.innerHTML; }
+      if (target && target.innerHTML !== fresh.innerHTML) {
+        // Keep the <details> the owner opened (News screen) open across the swap.
+        var open = Array.prototype.map.call(target.querySelectorAll("details[open][data-key]"), function (d) { return d.getAttribute("data-key"); });
+        target.innerHTML = fresh.innerHTML;
+        open.forEach(function (key) {
+          var d = target.querySelector('details[data-key="' + key + '"]');
+          if (d) { d.open = true; }
+        });
+      }
     });
   }
 
   // The Fleet screen refreshes /fragments/fleet; the Models screen refreshes /fragments/models for the
   // model that is selected on the page (so the selection stays put even when the ranking moves).
   function fragmentUrl() {
+    if ($("[data-news-screen]")) { return "/fragments/news"; }
     var screen = $("[data-models-screen]");
     if (!screen) { return "/fragments/fleet"; }
     var id = screen.getAttribute("data-selected-id");
@@ -133,7 +142,10 @@
   function modelsAction(button, action) {
     var id = button.dataset.modelId;
     var url, body, which = "model", done = "Done";
-    if (action === "search-start" || action === "search-stop") {
+    if (action === "news-start" || action === "news-stop") {
+      url = "/api/news/" + encodeURIComponent(button.dataset.market) + "/" + (action === "news-start" ? "start" : "stop");
+      which = "news";
+    } else if (action === "search-start" || action === "search-stop") {
       url = "/api/search/" + (action === "search-start" ? "start" : "stop");
       if (action === "search-start" && button.dataset.market) { body = { markets: [button.dataset.market] }; }
       which = "search";
@@ -178,7 +190,7 @@
         if (!r.ok) { toast(r.message, false); }
         return refresh();
       });
-    } else if (/^(search-(start|stop)|run-backtest|paper-(start|stop)|futures-prices|final-check|ask-review|futures-(start|stop)|topstep-resume)$/.test(action)) {
+    } else if (/^(search-(start|stop)|run-backtest|paper-(start|stop)|news-(start|stop)|futures-prices|final-check|ask-review|futures-(start|stop)|topstep-resume)$/.test(action)) {
       modelsAction(button, action);
     } else if (action === "run-again") {
       button.disabled = true;

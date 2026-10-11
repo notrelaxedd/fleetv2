@@ -1,9 +1,10 @@
 """The coordinator's only door to Alpaca (alpaca-py). Nothing else imports alpaca.
 
-It reads the market clock (are stocks open, when do they close) and the account
-(value, today's change), and places market orders. Every order reaches place_order()
-only through coordinator.safety.approve_and_place(), which checks the pause switch,
-the daily loss limit and the money limits first and logs the order.
+It reads the market clock (are stocks open, when do they close), the account (value,
+today's change) and an asset's shorting flags, and places market orders. Every order
+reaches place_order() only through coordinator.safety.approve_and_place(), which checks
+the pause switch, the daily loss limit, the money limits and the short rules first and
+logs the order.
 
 Mode: paper, always, unless ALPACA_LIVE=true is set in .env AND the owner confirmed
 live in the dashboard AND live keys are present. The broker never switches mode on its
@@ -27,6 +28,9 @@ from coordinator.config import Config
 log = logging.getLogger(__name__)
 
 STATUS_TTL_S = 30.0
+# Alpaca's shortable / easy-to-borrow flags are read at most this often per symbol: they
+# change rarely, and every short order would otherwise cost one more request.
+ASSET_TTL_S = 3600.0
 PAPER = "paper"
 LIVE = "live"
 
@@ -72,6 +76,16 @@ class OrderState:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class AssetInfo:
+    """What Alpaca says about one symbol, for the short checks in coordinator.safety."""
+
+    tradable: bool
+    shortable: bool
+    easy_to_borrow: bool
+    fractionable: bool
+
+
 # Alpaca order statuses -> ours.
 STATUS_MAP = {
     "filled": "filled",
@@ -109,6 +123,8 @@ class Broker(Protocol):
 
     def get_order(self, client_order_id: str) -> OrderState: ...
 
+    def asset_info(self, symbol: str) -> AssetInfo: ...
+
 
 class NoBroker:
     """No keys in .env: nothing is called, and the dashboard says what to add."""
@@ -130,6 +146,9 @@ class NoBroker:
         raise BrokerUnavailable(self.problem)
 
     def get_order(self, client_order_id: str) -> OrderState:
+        raise BrokerUnavailable(self.problem)
+
+    def asset_info(self, symbol: str) -> AssetInfo:
         raise BrokerUnavailable(self.problem)
 
 
@@ -203,6 +222,24 @@ class AlpacaBroker:
             raise BrokerUnavailable(f"Alpaca order lookup: {exc}") from None
         return self._state(order)
 
+    def asset_info(self, symbol: str) -> AssetInfo:
+        """Alpaca's flags for one symbol (TradingClient.get_asset), cached ASSET_TTL_S per
+        symbol. Raises BrokerUnavailable when Alpaca cannot be asked, so a short is never
+        placed on a guess."""
+        cache: dict[str, tuple[float, AssetInfo]] = self.__dict__.setdefault("_assets", {})
+        now = time.monotonic()
+        hit = cache.get(symbol)
+        if hit is not None and now - hit[0] < ASSET_TTL_S:
+            return hit[1]
+        try:
+            a = self._client.get_asset(symbol)
+        except Exception as exc:  # noqa: BLE001 - any failure means "unknown", which blocks the short
+            raise BrokerUnavailable(f"Alpaca asset {symbol}: {exc}") from None
+        info = AssetInfo(tradable=bool(a.tradable), shortable=bool(a.shortable),
+                         easy_to_borrow=bool(a.easy_to_borrow), fractionable=bool(a.fractionable))
+        cache[symbol] = (now, info)
+        return info
+
     @staticmethod
     def _state(order: Any) -> OrderState:
         raw = getattr(order.status, "value", order.status)
@@ -265,6 +302,16 @@ class FakeBroker:
 
     def get_order(self, client_order_id: str) -> OrderState:
         return getattr(self, "_orders", {}).get(client_order_id) or OrderState("rejected", error=NEVER_REACHED)
+
+    # Every symbol is tradable, shortable, easy to borrow and fractionable unless a test
+    # puts its own AssetInfo in `assets`; `asset_problem` makes the lookup fail.
+    assets: dict[str, AssetInfo] | None = None
+    asset_problem: str | None = None
+
+    def asset_info(self, symbol: str) -> AssetInfo:
+        if self.asset_problem:
+            raise BrokerUnavailable(self.asset_problem)
+        return (self.assets or {}).get(symbol) or AssetInfo(True, True, True, True)
 
 
 def key_fingerprint(key_id: str) -> str:

@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from coordinator import db, web
-from coordinator.api import dashboard, data, dl, futures, jobs, models, owner, trading, workers
+from coordinator.api import dashboard, data, dl, futures, jobs, models, news, owner, trading, workers
 from coordinator.broker import BrokerStatus, make_broker
 from coordinator.bundle import build_bundle
 from coordinator.config import Config
@@ -22,7 +22,7 @@ from coordinator.futures_trading import Venues
 from coordinator.topstep_broker import make_topstep
 from coordinator.errors import QueueError
 from coordinator.limits import load_limits
-from coordinator import ai_ideas, market_note
+from coordinator import ai_ideas, market_note, news_feed, news_trading, research
 from fleet2.sim.topstep import load_rules
 from coordinator import models as starter_models
 
@@ -138,6 +138,7 @@ def create_app(config: Config, broker_status: BrokerStatus | None = None) -> Fas
         app.state.pool = db.make_pool(config.database_url)
         with app.state.pool.connection() as conn:
             starter_models.sync_starters(conn)
+            news_trading.ensure_models(conn)
         try:
             yield
         finally:
@@ -150,6 +151,9 @@ def create_app(config: Config, broker_status: BrokerStatus | None = None) -> Fas
     app.state.ai = ai_ideas.load_settings(config.ai_path)
     app.state.ai_key = config.anthropic_api_key
     app.state.news = market_note.make_news(config)
+    # The news engine (docs/NEWS_PLAN.md): its own feed of articles and Claude's analyst.
+    app.state.news_feed = news_feed.make_news_source(config)
+    app.state.analyst = research.make_analyst(config, app.state.ai)
     if broker_status is None:
         broker_status = BrokerStatus(make_broker(config, _live_confirmed(config)))
     app.state.broker_status = broker_status
@@ -186,6 +190,7 @@ def create_app(config: Config, broker_status: BrokerStatus | None = None) -> Fas
     app.include_router(trading.owner_router)
     app.include_router(futures.worker_router)
     app.include_router(futures.owner_router)
+    app.include_router(news.router)
     app.include_router(owner.health_router)
     app.include_router(dl.router)
     app.include_router(dashboard.router)

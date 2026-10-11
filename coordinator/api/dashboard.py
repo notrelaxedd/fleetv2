@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from markupsafe import Markup
 
-from coordinator import ai_ideas, ai_reviews, charts, fleet_view, futures_view, market_note, models_view, search, trading_view, web
+from coordinator import ai_ideas, ai_reviews, charts, fleet_view, futures_view, market_note, models_view, news_view, search, trading_view, web
 from coordinator.api.deps import DB, require_owner
 
 router = APIRouter(dependencies=[Depends(require_owner)])
@@ -74,3 +74,18 @@ def models(request: Request, conn: psycopg.Connection = DB) -> HTMLResponse:
 def models_fragment(request: Request, conn: psycopg.Connection = DB) -> HTMLResponse:
     """The parts of the Models screen (and the header status) that app.js swaps every 5 seconds."""
     return web.render("models_fragment.html", _models_context(request, conn))
+
+
+def _news_context(request: Request, conn: psycopg.Connection) -> dict[str, Any]:
+    return news_view.news_page(conn, request.app.state, request.app.state.broker_status, request.app.state.limits)
+
+
+@router.get("/news", response_class=HTMLResponse)
+def news(request: Request, conn: psycopg.Connection = DB) -> HTMLResponse:
+    return web.render("news.html", {"current": "news", **_news_context(request, conn)})
+
+
+@router.get("/fragments/news", response_class=HTMLResponse)
+def news_fragment(request: Request, conn: psycopg.Connection = DB) -> HTMLResponse:
+    """The parts of the News screen (and the header status) that app.js swaps every 5 seconds."""
+    return web.render("news_fragment.html", _news_context(request, conn))

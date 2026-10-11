@@ -97,6 +97,11 @@ class BarSource(Protocol):
 
     def feed_for(self, symbol: str) -> str: ...
 
+    def latest_prices(self, symbols: list[str]) -> dict[str, float]:
+        """The latest trade price per symbol (news stops and sizing). A symbol with no
+        answer is simply missing; this never raises."""
+        ...
+
 
 def is_crypto(symbol: str) -> bool:
     return "/" in symbol
@@ -206,6 +211,49 @@ class AlpacaBarSource:
         self.limiter.acquire()
         return list(client.get_crypto_bars(request).data.get(symbol, []))
 
+    def latest_prices(self, symbols: list[str]) -> dict[str, float]:
+        """Alpaca's latest trade per symbol: one request for all the stocks (on the
+        configured feed) and one for all the coins, each through the rate limiter. A
+        market whose request fails is left out (and logged): the caller then has no
+        price for those symbols, which holds back entries and stop checks rather than
+        acting on an old price."""
+        stocks = sorted({s for s in symbols if not is_crypto(s)})
+        coins = sorted({s for s in symbols if is_crypto(s)})
+        out: dict[str, float] = {}
+        if stocks:
+            try:
+                from alpaca.data.enums import DataFeed
+                from alpaca.data.requests import StockLatestTradeRequest
+
+                request = StockLatestTradeRequest(symbol_or_symbols=stocks,
+                                                  feed=DataFeed.SIP if self.feed == "sip" else DataFeed.IEX)
+                client = self._stocks()
+                self.limiter.acquire()
+                out.update(_trade_prices(client.get_stock_latest_trade(request)))
+            except Exception as exc:  # noqa: BLE001 - reported; the prices are just missing
+                log.warning("latest stock prices: %s", exc)
+        if coins:
+            try:
+                from alpaca.data.requests import CryptoLatestTradeRequest
+
+                request = CryptoLatestTradeRequest(symbol_or_symbols=coins)
+                client = self._crypto()
+                self.limiter.acquire()
+                out.update(_trade_prices(client.get_crypto_latest_trade(request)))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("latest crypto prices: %s", exc)
+        return {s: p for s, p in out.items() if s in symbols}
+
+
+def _trade_prices(trades: Any) -> dict[str, float]:
+    """{symbol: price} from alpaca-py's {symbol: Trade}, skipping missing or bad prices."""
+    out: dict[str, float] = {}
+    for symbol, trade in dict(trades or {}).items():
+        price = getattr(trade, "price", None)
+        if price is not None and float(price) > 0:
+            out[str(symbol)] = float(price)
+    return out
+
 
 class FakeBarSource:
     """Deterministic synthetic bars for tests and FLEET_FAKE_BROKER=1 demos.
@@ -264,6 +312,18 @@ class FakeBarSource:
         with self._lock:
             self._cache[key] = series
         return series
+
+    def latest_prices(self, symbols: list[str], now: datetime | None = None) -> dict[str, float]:
+        """The close of each symbol's last synthetic bar that has closed by `now`."""
+        moment = int(_utc(now or datetime.now(timezone.utc)).timestamp())
+        out: dict[str, float] = {}
+        for symbol in symbols:
+            timeframe = "1Hour" if is_crypto(symbol) else "1Day"
+            s = self._series(symbol, timeframe)
+            i = int(np.searchsorted(s["t"], moment - int(TIMEFRAME_DELTA[timeframe].total_seconds()), side="right")) - 1
+            if i >= 0:
+                out[symbol] = float(s["c"][i])
+        return out
 
     def fetch(self, symbol: str, timeframe: str, start: datetime, end: datetime) -> list[dict]:
         s = self._series(symbol, timeframe)
