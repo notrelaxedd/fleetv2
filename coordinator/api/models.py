@@ -1,7 +1,7 @@
 """Model routes: workers report backtest results; the owner lists models."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import psycopg
 from fastapi import APIRouter, Depends, Request
@@ -175,6 +175,47 @@ def take_ideas(body: IdeasBody, request: Request, token: str = Depends(bearer),
     settings = request.app.state.ai
     count = min(body.take, settings.per_round) if settings.enabled and request.app.state.ai_key else 0
     return ai_ideas.take(conn, body.job_id, count)
+
+
+class TrialBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    params: dict[str, Any] = Field(default_factory=dict)
+    score: float | None = None  # a score that is not a finite number is stored as none
+    rejected: str | None = Field(default=None, max_length=1000)
+    metrics: dict[str, Any] | None = None
+
+    @field_validator("params", "metrics")
+    @classmethod
+    def _small(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        return small_payload(value, "trial")
+
+
+class LogBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    job_id: str | None = Field(default=None, max_length=64)
+    market: Literal["stocks", "crypto", "futures"]
+    family: str = Field(min_length=1, max_length=128)
+    trials: list[TrialBody] = Field(max_length=search.MAX_TRIALS_PER_CALL)
+
+
+@worker_search_router.post("/log")
+def post_log(body: LogBody, token: str = Depends(bearer), conn: psycopg.Connection = DB) -> dict[str, Any]:
+    """The settings a search round tried (up to 1000), with their training scores and why
+    each was thrown away; metrics keep compact numbers only (curves and daily arrays are
+    stripped)."""
+    worker = auth.worker_for_token(conn, token)
+    stored = search.log_trials(conn, worker["id"], body.job_id, body.market, body.family,
+                               [t.model_dump() for t in body.trials])
+    return {"stored": stored}
+
+
+@worker_search_router.get("/log")
+def get_log(request: Request, market: str, family: str, token: str = Depends(bearer),
+            conn: psycopg.Connection = DB) -> dict[str, Any]:
+    """What the log knows about one model file or recipe: counts, best score, whether it
+    gave up, and its best 200 trials plus its 300 latest."""
+    auth.worker_for_token(conn, token)
+    return jsonable(search.family_log(conn, market, family, request.app.state.topstep))
 
 
 class SearchBody(BaseModel):

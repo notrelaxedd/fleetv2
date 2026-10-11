@@ -76,6 +76,38 @@ def beats_twin(entry: dict[str, Any], rules: topstep.Rules) -> bool | None:
     return True if net is None or twin_net is None else net > twin_net
 
 
+FLOOR_PASS_RATE = 0.02   # "(nearly) zero" pass rate
+FLOOR_TIMEOUT_SHARE = 0.5  # "mostly ran out of time"
+
+
+def timeout_share(sim: dict[str, Any]) -> float | None:
+    """The share of attempts that ran out of time (neither passed nor hit the loss floor):
+    the simulation's count of given-up attempts, else what pass and fail rates leave over."""
+    attempts, gave_up = sim.get("attempts"), sim.get("gave_up")
+    if attempts and gave_up is not None:
+        return float(gave_up) / float(attempts)
+    if sim.get("pass_rate") is not None and sim.get("fail_rate") is not None:
+        return max(0.0, 1.0 - float(sim["pass_rate"]) - float(sim["fail_rate"]))
+    return None
+
+
+def floor_note(pick: dict[str, Any], rules: topstep.Rules) -> str | None:
+    """Why a model sits on the fee floor, in plain words: it (nearly) never reaches the
+    profit target and its attempts mostly run out of time, so all it does is pay the
+    monthly fee. None for any other model (or when the timeout share is not known)."""
+    sim = pick.get("sim") or {}
+    rate = sim.get("pass_rate")
+    if rate is None or rate > FLOOR_PASS_RATE:
+        return None
+    timeout = timeout_share(sim)
+    if timeout is None or timeout < FLOOR_TIMEOUT_SHARE:
+        return None
+    text = "Never reaches the target: it pays the monthly fee until time runs out."
+    if rules.combine_monthly is not None and sim.get("mean_months") is not None:
+        text += f" The fees alone cost about {dollars(rules.combine_monthly * sim['mean_months'], signed=False)} an attempt."
+    return text
+
+
 def luck(m: dict[str, Any], tries: dict[str, dict[str, float]]) -> dict[str, Any]:
     """The "chance this is luck" figure and how many tries it counts."""
     train = (m.get("metrics") or {}).get("train") or {}
@@ -130,6 +162,7 @@ def list_row(m: dict[str, Any], rules: topstep.Rules) -> dict[str, Any]:
                       + (f" · {per_day_text(daily['value'])} a day of {per_day_text(daily['needed'])} needed"
                          if daily and daily["value"] is not None else "")
                       if st["tested"] else "Not tested yet"),
+        "floor_note": floor_note(pick, rules) if st["tested"] and pick else None,
         "beats": st["beats"], "rankable": rankable, "retired": retired, "stale": st["stale"], "tested": st["tested"],
         "feed_tag": FEED_TAG.get(feed) if feed else None, "proxy": feed in ("proxy", "synthetic"),
         "spark": curve[::step][:SPARK_POINTS] if curve else [],
@@ -262,6 +295,9 @@ def cards(m: dict[str, Any], rules: topstep.Rules, pick: dict[str, Any], tries: 
               f"Counting {lk['trials']:,} setting{'s' if lk['trials'] != 1 else ''} tried",
               "plain" if lk["value"] is None else "gain" if lk["value"] < 0.05 else "warn" if lk["value"] < 0.5 else "loss"),
     ]
+    flag = floor_note(pick, rules)
+    if flag:
+        next(c for c in out if c["key"] == "net")["flag"] = flag
     return out
 
 

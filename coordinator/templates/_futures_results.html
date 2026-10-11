@@ -33,6 +33,7 @@
       <p class="mvalue num" data-value>{{ c.value }}</p>
       <p class="mdescr" data-description>{{ c.description }}</p>
       {% if c.note %}<p class="mnote" data-note>{{ c.note }}</p>{% endif %}
+      {% if c.flag %}<p class="mnote" data-floor-note>{{ c.flag }}</p>{% endif %}
     </article>
   {% endfor %}
   </div>

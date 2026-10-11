@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from psycopg_pool import ConnectionPool
 
-from coordinator import queue
+from coordinator import queue, search
 
 log = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ def run_once(pool: ConnectionPool, extra: tuple[Task, ...] = ()) -> dict[str, An
     with pool.connection() as conn:
         queue.release_dead_targets(conn)
         dispatched = queue.dispatch(conn)
-    for task in extra:
+    for task in (*extra, search.prune_if_due):  # the last keeps the search log to its size cap
         try:
             task(pool)
         except Exception:  # noqa: BLE001 - keep the loop alive

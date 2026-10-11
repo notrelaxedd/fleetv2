@@ -120,23 +120,48 @@ def backtest_params(conn: psycopg.Connection, model: dict[str, Any], rules: tops
             "rules": rules.to_dict(), "periods": futures_data.futures_periods(conn)}
 
 
+def given_up(conn: psycopg.Connection, rules: topstep.Rules) -> tuple[list[str], list[str], int]:
+    """(model files, recipes, tries counted) that gave up (coordinator.search): the
+    search leaves them out. The tries are the settings tried for the model files."""
+    from coordinator import search
+
+    gone = search.gave_up_families(conn, "futures", rules)
+    files = sorted(f for f in gone if f in REGISTRY)
+    recipes = sorted(f for f in gone if recipe.is_recipe(f))
+    counted = tries(conn)
+    return files, recipes, sum(max(gone[f]["tried"], int(counted.get(f, {}).get("n", 0))) for f in files)
+
+
 def search_params(conn: psycopg.Connection, rules: topstep.Rules) -> dict[str, Any]:
+    """The futures search job's parameters. A model file that gave up is left out of
+    "files" (set only then; without it a worker searches every file) and a recipe that
+    gave up is named in "skip_recipes". When every model file gave up, the search keeps
+    going on recipes alone (random ones and Claude Haiku's): new ideas are what is needed."""
     require_trading_fees(rules)
     if futures_data.futures_feed(conn) is None:
         raise Conflict("No futures prices yet: press Load futures prices first")
-    return {"markets": ["futures"], "rules": rules.to_dict(), "periods": futures_data.futures_periods(conn),
-            "candidates": 16}
+    skip_files, skip_recipes, _ = given_up(conn, rules)
+    params = {"markets": ["futures"], "rules": rules.to_dict(), "periods": futures_data.futures_periods(conn),
+              "candidates": 16, "skip_recipes": skip_recipes}
+    if skip_files:
+        params["files"] = [f for f in sorted(REGISTRY) if f not in skip_files]
+        params["recipes"] = True
+    return params
 
 
-def shares(workers: int) -> list[dict[str, Any]]:
+def shares(workers: int, files: list[str] | None = None) -> list[dict[str, Any]]:
     """What each of `workers` search jobs searches, so no two do the same thing: one
     worker searches everything; with more, the first takes the recipes (new random ones,
     Haiku's and the kept ones, about as much work as all the files) and the others split
     the model files between them. More workers than files: files get a second worker
-    (each job has its own seed, so they still try different settings)."""
-    files = sorted(REGISTRY)
+    (each job has its own seed, so they still try different settings). `files` are the
+    model files still worth searching (those that have not given up; default: all). No
+    worker is handed an empty share: with no file left every worker takes the recipes."""
+    files = sorted(REGISTRY if files is None else [f for f in files if f in REGISTRY])
     if workers <= 1:
         return [{"files": files, "recipes": True}]
+    if not files:
+        return [{"files": [], "recipes": True} for _ in range(workers)]
     rest = workers - 1
     out = [{"files": [], "recipes": True}]
     for i in range(rest):

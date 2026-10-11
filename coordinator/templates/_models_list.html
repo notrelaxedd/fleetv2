@@ -13,6 +13,7 @@
         <span class="tag" data-tag="status" data-status="{{ m.status_key }}">{{ m.status }}</span>
         {% if m.not_enough %}<span class="tag warn" data-tag="not-enough">Not enough trades</span>{% endif %}
         {% if m.luck %}<span class="tag warn" data-tag="luck">Could be luck</span>{% endif %}
+        {% for f in m.robust_flags %}<span class="tag warn" data-tag="robust-{{ f.key }}" title="{{ f.text }}">{{ f.tag }}</span>{% endfor %}
         {% if m.stale %}<span class="tag warn" data-tag="stale">Old held-out period: backtest again</span>{% endif %}
       </span>
     </a>

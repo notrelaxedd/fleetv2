@@ -7,6 +7,9 @@
                          a sleep job, to watch progress on the Fleet screen
   futures-prices         a Futures prices job: download MES and MNQ 1-minute prices
                          (the Models screen's Futures view has the same button)
+  reset-search-log [--market stocks|crypto|futures] [--family NAME]
+                         forget what model search has tried (all of it, one market or one
+                         model file/recipe), so families that gave up try again
 """
 from __future__ import annotations
 
@@ -14,7 +17,7 @@ import argparse
 import json
 import sys
 
-from coordinator import auth, db, queue
+from coordinator import auth, db, queue, search
 from coordinator.config import Config
 
 
@@ -28,6 +31,9 @@ def main(argv: list[str] | None = None) -> int:
     test.add_argument("--seconds", type=int, default=60)
     test.add_argument("--target", default="auto")
     sub.add_parser("futures-prices")
+    reset = sub.add_parser("reset-search-log")
+    reset.add_argument("--market", choices=search.LOG_MARKETS)
+    reset.add_argument("--family")
     args = parser.parse_args(argv)
     config = Config.from_env()
     if args.command == "migrate":
@@ -57,6 +63,10 @@ def main(argv: list[str] | None = None) -> int:
             result = queue.create_job(conn, "data_refresh", {"markets": ["futures"]}, queue.AUTO)
             job = result.jobs[0]
             print(f"futures prices job {job['id']} -> {job['target_worker_id'] or 'waiting for a free worker'}")
+        elif args.command == "reset-search-log":
+            deleted = search.reset(conn, args.market, args.family)
+            what = " ".join(x for x in (args.market, args.family) if x) or "everything"
+            print(f"search log reset ({what}): {deleted:,} row{'s' if deleted != 1 else ''} deleted")
     return 0
 
 

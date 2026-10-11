@@ -13,6 +13,7 @@
         <span class="tag" data-tag="status" data-status="{{ m.status_key }}">{{ m.status }}</span>
         {% if m.feed_tag %}<span class="tag{% if m.proxy %} warn{% endif %}" data-tag="feed">{{ m.feed_tag }}</span>{% endif %}
         {% if m.tested and m.beats == false %}<span class="tag warn" data-tag="twin">No better than a coin flip</span>{% endif %}
+        {% if m.floor_note %}<span class="tag warn" data-tag="floor" title="{{ m.floor_note }}">Never reaches the target</span>{% endif %}
         {% if m.stale %}<span class="tag warn" data-tag="stale">Rules changed: backtest again</span>{% endif %}
       </span>
     </a>

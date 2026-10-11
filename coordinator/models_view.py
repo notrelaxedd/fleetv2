@@ -48,6 +48,20 @@ METRICS = (
      "Return per year the model made on top of what its beta alone would have earned. Above zero means it added "
      "something the market didn't hand it."),
 )
+# Robustness flags: key -> (tag, one plain sentence on what it means).
+ROBUSTNESS = {
+    "inconsistent": ("Inconsistent",
+                     "Its results swing from one stretch of the training period to the next, so a single good stretch "
+                     "may be doing most of the work."),
+    "fragile": ("Fragile settings",
+                "Nudging its settings a little makes it do much worse, so the good result may sit on a lucky spot."),
+    "cost_sensitive": ("Breaks at higher costs",
+                       "It stops making money when trading costs rise a little, so real-world costs could wipe out "
+                       "its profit."),
+    "no_better_than_random": ("No better than random",
+                              "Random trading with the same rhythm does about as well, so it may have no real edge."),
+}
+NOT_ROBUST_NOTE = "Shown but not ranked: it did not pass the robustness checks."
 LUCK_NOTE = "Could be luck"
 OLD_RESULT = "Backtest again to see this"
 MARKET_TEXT = {"stocks": "Stocks", "crypto": "Crypto", "futures": "Futures"}
@@ -126,6 +140,17 @@ def metric_cards(held: dict[str, Any], market: str) -> list[dict[str, Any]]:
     return cards
 
 
+def robustness_of(metrics: dict[str, Any] | None) -> tuple[list[dict[str, str]], bool]:
+    """([{"key", "tag", "text"} per flag raised, in a fixed order], failed). `failed` is
+    True only when the block exists and says passed False; no block means no flags."""
+    block = (metrics or {}).get("robustness")
+    if not isinstance(block, dict):
+        return [], False
+    raised = set(block.get("flags") or [])
+    flags = [{"key": k, "tag": tag, "text": text} for k, (tag, text) in ROBUSTNESS.items() if k in raised]
+    return flags, block.get("passed") is False
+
+
 def could_be_luck(held: dict[str, Any] | None) -> bool:
     """True when the held-out t-statistic is known and under LUCK_T."""
     t = (held or {}).get("t_stat")
@@ -180,6 +205,7 @@ def list_row(m: dict[str, Any], held_out_starts: dict[str, Any] | None = None) -
     stale = bool(held and start is not None and metrics.get("split_t") is not None
                  and abs(int(metrics["split_t"]) - int(start)) > 3 * 86400)
     enough = bool(held and int(held.get("trades") or 0) >= MIN_TRADES)
+    flags, not_robust = robustness_of(metrics)
     return {
         "id": m["id"],
         "name": m["name"],
@@ -191,7 +217,9 @@ def list_row(m: dict[str, Any], held_out_starts: dict[str, Any] | None = None) -
         "roi": signed_pct(held.get("roi")) if held else "-",
         "roi_value": held.get("roi") if held else None,
         "tone": _tone(held.get("roi")) if held else "plain",
-        "enough_trades": enough and not stale and m["status"] != "retired",
+        "enough_trades": enough and not stale and m["status"] != "retired" and not not_robust,
+        "robust_flags": flags,
+        "not_robust": not_robust,
         "retired": m["status"] == "retired",
         "not_enough": bool(held) and not enough,
         "luck": could_be_luck(held),
@@ -232,7 +260,12 @@ def detail(m: dict[str, Any], paper: dict[str, Any] | None = None) -> dict[str, 
         tags.append("Not enough trades")
     if could_be_luck(held):
         tags.append(LUCK_NOTE)
+    flags, not_robust = robustness_of(metrics)
+    tags += [f["tag"] for f in flags]
     out: dict[str, Any] = {
+        "warn_tags": ["Not enough trades", LUCK_NOTE] + [t for t, _ in ROBUSTNESS.values()],
+        "robustness": flags,
+        "robustness_note": NOT_ROBUST_NOTE if not_robust else None,
         "id": m["id"],
         "name": m["name"],
         "tags": tags,
@@ -280,7 +313,9 @@ def models_page(conn: psycopg.Connection, selected_id: str | None = None,
         r["selected"] = r["id"] == chosen
     notice = None
     if rows and not any(r["enough_trades"] for r in rows):
-        notice = "No model has 100 trades on the held-out period yet, so none is ranked."
+        notice = ("No model has 100 trades and passes the robustness checks on the held-out period yet, so none is ranked."
+                  if any(r["not_robust"] for r in rows)
+                  else "No model has 100 trades on the held-out period yet, so none is ranked.")
     return {
         "notice": notice,
         "models": rows,
