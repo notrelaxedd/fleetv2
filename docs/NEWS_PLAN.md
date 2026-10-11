@@ -95,7 +95,7 @@ book is short S the account's position in S is exactly that short.
 
 These are the contracts between the parts; each part may add private helpers.
 
-### Tables (`coordinator/migrations/0008_news.sql`)
+### Tables (`coordinator/migrations/0009_news.sql`)
 `news`, `news_analyses`, `news_predictions` (scores are columns on the prediction),
 `news_positions`; `models.origin` gains `'news'`.
 
