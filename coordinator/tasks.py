@@ -5,7 +5,15 @@ its own transaction; one failing never stops the others):
 - daily loss: pause all trading when the account is down more than the limit today
 - trading: turn models' decisions into orders and book fills
 - price data: keep the bars fresh for markets that have a model paper trading
-  (crypto every hour, stocks every few hours), so workers decide on current data
+  (crypto every hour, stocks every few hours), so workers decide on current data, and
+  for markets with news predictions waiting to be scored
+- news trading: open and close the news strategies' positions (after the models'
+  own orders, on this same thread, so fills are never booked by two threads at once)
+- news scoring: score predictions whose horizon has passed, every few minutes
+
+make_news_tasks() is the news engine's own loop (a second thread): fetch new articles
+from Alpaca's news feed and have Claude analyse them. Both are slow network calls, so
+they never run on the main loop.
 """
 from __future__ import annotations
 
@@ -16,17 +24,20 @@ from typing import Any, Callable
 
 from psycopg_pool import ConnectionPool
 
-from coordinator import data, safety, trading
+from coordinator import data, news_feed, news_scoring, news_trading, research, safety, trading
 from coordinator.broker import BrokerStatus
 from coordinator.limits import Limits
 from fleet2.universe import MARKETS
 
 log = logging.getLogger(__name__)
 REFRESH_EVERY_S = {"crypto": 15 * 60, "stocks": 3 * 3600}
+SCORE_EVERY_S = 10 * 60
+NEWS_POLL_EVERY_S = 60
 
 
 def make_tasks(status: BrokerStatus, limits: Limits, bar_source: Any) -> tuple[Callable[[ConnectionPool], None], ...]:
     last_refresh: dict[str, float] = {}
+    last_score = [-1e9]
 
     def broker_status(pool: ConnectionPool) -> None:
         status.refresh()
@@ -41,11 +52,23 @@ def make_tasks(status: BrokerStatus, limits: Limits, bar_source: Any) -> tuple[C
         with pool.connection() as conn:
             trading.poll_fills(conn, status)
             trading.execute_pass(conn, status, limits)
+            news_trading.news_pass(conn, status, limits, bar_source.latest_prices, datetime.now(timezone.utc))
+
+    def score_news(pool: ConnectionPool) -> None:
+        now = time.monotonic()
+        if now - last_score[0] < SCORE_EVERY_S:
+            return
+        last_score[0] = now
+        with pool.connection() as conn:
+            scored = news_scoring.score_pending(conn, limits, datetime.now(timezone.utc))
+        if scored:
+            log.info("news scoring: %d prediction(s) scored", scored)
 
     def fresh_prices(pool: ConnectionPool) -> None:
         with pool.connection() as conn:
             markets = [r["market"] for r in conn.execute(
-                "SELECT DISTINCT m.market FROM books b JOIN models m ON m.id = b.model_id WHERE b.status = 'active'")]
+                "SELECT DISTINCT m.market FROM books b JOIN models m ON m.id = b.model_id WHERE b.status = 'active'"
+                " UNION SELECT DISTINCT market FROM news_predictions WHERE scored_at IS NULL AND direction <> 'none'")]
         now = time.monotonic()
         for market in markets:
             if now - last_refresh.get(market, -1e9) < REFRESH_EVERY_S[market]:
@@ -53,7 +76,33 @@ def make_tasks(status: BrokerStatus, limits: Limits, bar_source: Any) -> tuple[C
             last_refresh[market] = now
             refresh_market(pool, bar_source, market)
 
-    return (broker_status, daily_loss, trade, fresh_prices)
+    return (broker_status, daily_loss, trade, score_news, fresh_prices)
+
+
+def make_news_tasks(news_source: Any, analyst: Any, settings: Any, bar_source: Any) -> tuple[Callable[[ConnectionPool], None], ...]:
+    """The news thread's tasks: fetch new articles every minute, and have Claude analyse
+    the waiting ones a few at a time (each call takes seconds)."""
+    last_poll = [-1e9]
+
+    def fetch_news(pool: ConnectionPool) -> None:
+        if not news_source.connected:
+            return
+        now = time.monotonic()
+        if now - last_poll[0] < NEWS_POLL_EVERY_S:
+            return
+        last_poll[0] = now
+        with pool.connection() as conn:
+            step = news_feed.poll_step(conn, news_source, datetime.now(timezone.utc))
+        if step.get("error"):
+            log.warning("news feed: %s", step["error"])
+
+    def analyse_news(pool: ConnectionPool) -> None:
+        if not analyst.connected or not settings.news_enabled:
+            return
+        with pool.connection() as conn:
+            research.analyse_pending(conn, analyst, settings, datetime.now(timezone.utc), bar_source.latest_prices)
+
+    return (fetch_news, analyse_news)
 
 
 def refresh_market(pool: ConnectionPool, bar_source: Any, market: str, max_steps: int = 50) -> int:

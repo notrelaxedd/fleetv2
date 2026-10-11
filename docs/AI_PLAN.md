@@ -41,6 +41,11 @@ average price". After a few hours it has tried most of what those five ideas can
 6. **No AI ever trades.** AI output never places an order, starts or stops a model, or
    changes a setting. It goes through the same backtest, Final check and Alpaca paper
    trading as everything else.
+   *Exception, asked for by the owner on 2026-10-11:* the news strategies
+   (docs/NEWS_PLAN.md) trade Claude's predictions about news, on Alpaca paper only. They
+   follow the reasoning below: they are tested only after Claude's training cutoff and
+   going forward, they may start only once their scored predictions beat a coin flip,
+   and every order goes through the same safety checks as any other.
 
 ### Why an AI cannot simply be backtested on the news
 
