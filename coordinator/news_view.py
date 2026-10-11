@@ -174,7 +174,10 @@ def scores(conn: psycopg.Connection, limits: Any) -> list[dict[str, Any]]:
         live = news_scoring.stats(conn, market=market, source="live")["n"]
         replay = news_scoring.stats(conn, market=market, source="replay")["n"]
         out.append({"market": market, "name": MARKET_NAME[market], "cards": _score_cards(s, market),
-                    "gate_ok": ok, "gate_reason": reason, "live": live, "replay": replay, "detail": _detail_rows(s)})
+                    "gate_ok": ok, "gate_reason": reason, "live": live, "replay": replay, "detail": _detail_rows(s),
+                    # The gate counts only the calls the strategy would trade, so its numbers
+                    # can differ from the cards below, which count every call.
+                    "gate_basis": f"Counted on the calls it would trade: confidence {limits.min_confidence:g} or more."})
     return out
 
 

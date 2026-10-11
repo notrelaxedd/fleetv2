@@ -2,6 +2,7 @@
 <article class="card nblock" data-score="{{ s.market }}">
   <h3 class="ntitle">{{ s.name }}</h3>
   <p class="ngate" data-gate data-ok="{{ 'true' if s.gate_ok else 'false' }}">{{ s.gate_reason }}</p>
+  <p class="muted small" data-gate-basis>{{ s.gate_basis }} The cards below count every call.</p>
   <p class="muted small" data-source-counts>Scored so far: {{ s.live }} live (predicted before the price moved), {{ s.replay }} replay (older news replayed with only the prices known at the time).</p>
   <div class="mcards five">
   {% for c in s.cards %}

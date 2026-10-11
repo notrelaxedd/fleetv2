@@ -121,8 +121,8 @@ run at once (`Conflicts=` in the service file).
 
 ## Using it
 
-The dashboard has two screens, **Fleet** and **Models** (with a Futures view, see
-"Futures on the Models screen"). The header shows the trading
+The dashboard has three screens, **Fleet**, **Models** (with a Futures view, see
+"Futures on the Models screen") and **News** (see "News engine"). The header shows the trading
 mode, whether stocks and crypto are open, and the Pause all trading button.
 
 ![Models screen](docs/screenshots/stage5-models-desktop.png)
@@ -648,6 +648,66 @@ Never use it with real keys. For a local run also set `FLEET_DEV=1` (no Tailscal
 needed) and `DATABASE_URL` to a Postgres database, then `python -m coordinator.main`.
 
 ## News engine
+
+Claude Opus reads the market news and predicts how each stock or coin it names will move.
+Every prediction is saved and later checked against what the price really did, beside a
+coin-flip twin. Two news strategies (stocks, crypto) trade those predictions on Alpaca
+paper, but only once they have proved themselves. The plan and its reasons are in
+`docs/NEWS_PLAN.md`; it is the owner's exception to "No AI ever trades" in `docs/AI_PLAN.md`.
+
+![News screen](docs/screenshots/news-desktop.png)
+
+**Setup.** It uses the same `ANTHROPIC_API_KEY` in `.env` on box1 as the Haiku features,
+and the Alpaca paper keys for the news feed. Its settings are in `config/ai.toml` [news]:
+the model (`claude-opus-5-5`), effort, and `daily_cap_usd` (5 dollars a day). It also
+counts against `monthly_cap_usd`, the one cap for all Claude features, which is 5 dollars
+by default: **raise it** (about 155 for 5 dollars a day plus the Haiku features), or the
+news engine stops once the month's cap is used. Then `docker compose restart coordinator`.
+
+**How it works.**
+
+1. Every minute the coordinator fetches new articles from Alpaca's news feed that name
+   one of the 30 stocks and coins we trade (`coordinator/news_feed.py`).
+2. Claude reads each one (articles over 6 hours old are skipped) and, per symbol, gives a
+   direction (up, down or none), the size of the move, how many trading days it should
+   take (1 to 10), its confidence, and whether the news is already in the price
+   (`coordinator/research.py`). The article is treated as untrusted text: Claude has no
+   tools, its answer must fit a fixed shape, and anything else is dropped. About 4 cents
+   an article.
+3. Once the horizon has passed, each prediction is scored: bought (or sold short) at the
+   open of the first bar after the decision, sold at the close of the last day, after
+   costs, beside SPY or BTC and beside a coin-flip twin with the same bars
+   (`coordinator/news_scoring.py`).
+4. A strategy can start paper trading only when its scored predictions (the ones
+   confident enough to trade) beat the coin-flip twin by more than twice the luck
+   margin, over at least 100 of them, and make money after costs. The **News** screen
+   says how far each one is from that.
+
+**News screen.** The status of the feed and of Claude, today's and this month's spend
+against the caps, the scores per market with the coin-flip comparison, the paper books
+with **Start paper trading** (greyed out with the reason until the scores allow it) and
+**Stop paper trading**, and the latest articles with Claude's call on each symbol and its
+score once known.
+
+**What the news strategies trade** (limits in `config/limits.toml`, [money] and [news]):
+
+- A prediction is traded only if it is at most 30 minutes old, its confidence is at
+  least `min_confidence` (0.6), it is not already priced in, and the move is at least
+  `cost_multiple` (2) times the round-trip cost. At most `max_trades_per_day` (10) new
+  positions per strategy a day, one per symbol.
+- Up: buy, up to `max_per_position` (1,000 dollars). Down: for stocks, a **short sale** of
+  whole shares, up to `max_per_short_position` (500 dollars) and `max_short_per_model`
+  (5,000) in total; for crypto (Alpaca cannot short it) only the sale of a coin it holds.
+  Longs and shorts together stay within `max_per_model`.
+- Each position has a stop `stop_loss_pct` (5%) from its entry, watched against Alpaca's
+  latest price on every loop pass, and is closed when its horizon ends or a newer
+  prediction says the opposite. The stops are watched by box1: while it is off, they
+  are not.
+- All books share one Alpaca account, so: a stock is only shorted if Alpaca says it is
+  shortable and easy to borrow, no book shorts what another holds or is buying, no book
+  buys what another is short, no sale turns a long into a short, and the news strategies
+  never trade SPY or QQQ (the futures paper books use them). Pause all trading and the
+  daily loss limit stop them like everything else.
 
 ### News replay
 
