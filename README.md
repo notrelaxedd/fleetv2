@@ -647,6 +647,31 @@ whole thing can be tried with no keys. The dashboard labels it "demo data" on sc
 Never use it with real keys. For a local run also set `FLEET_DEV=1` (no Tailscale login
 needed) and `DATABASE_URL` to a Postgres database, then `python -m coordinator.main`.
 
+## News engine
+
+### News replay
+
+Claude remembers how most past news turned out, so a test on old news would look
+brilliant and prove nothing. The replay only uses news published after Claude's training
+cutoff plus a margin (`no_replay_before` in `config/limits.toml`, 2026-08-01). It shows
+Claude each such article as if it were live, five minutes after publication, with only
+the prices known by then, saves the predictions as "replay" and scores them like live
+ones (`coordinator/news_replay.py`). It spends real money, so run it by hand, as root in
+the coordinator container, first **without** `--yes` to see the window, how many
+articles are stored and a rough cost, then with it:
+
+```
+docker compose exec coordinator python -m coordinator.cli news-replay --since 2026-08-01 --max-usd 20
+docker compose exec coordinator python -m coordinator.cli news-replay --since 2026-08-01 --max-usd 20 --yes
+```
+
+- `--until YYYY-MM-DD` ends the window at the start of that day (UTC); the default is now.
+- It stops before an article that could take the run past `--max-usd`, or the month past
+  `monthly_cap_usd` in `config/ai.toml`, and says which. It does **not** use the live
+  daily news cap; replay calls show in the AI spend as `news_replay`.
+- Run it again to carry on: an article is replayed once, never twice. Three failed
+  analyses in a row (a refused key, an outage) stop it.
+
 ## Future options (not built)
 
 Neither is switched on without the owner's OK. See `PLAN.md`.
