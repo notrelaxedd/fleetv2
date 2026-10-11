@@ -7,9 +7,10 @@ How a model trades:
 2. The worker computes the model's target weights whenever a new bar closes and posts
    them here as a signal. Workers never see keys and never call Alpaca.
 3. The executor (coordinator background loop) turns the latest decision into orders,
-   sized exactly as the backtester sizes them (same caps, same $25 no-trade band),
-   and sends each through coordinator.safety.approve_and_place. Stock orders wait for
-   the market to open; crypto trades around the clock; nothing trades while paused.
+   sized exactly as the backtester sizes them (fleet2.sim.backtest.rebalance_trades:
+   same caps, same $25 minimum order, same 20% rebalance band), and sends each
+   through coordinator.safety.approve_and_place. Stock orders wait for the market to
+   open; crypto trades around the clock; nothing trades while paused.
 4. The fill poller books what Alpaca filled into the model's book.
 Stopping paper trading sells the model's positions (when trading is allowed) and then
 closes the book.
@@ -31,7 +32,7 @@ from coordinator.safety import HALTS, approve_and_place, is_paused
 from coordinator.broker import NEVER_REACHED
 from fleet2.models import get_module
 from fleet2.models.base import BadTargets, clean_targets
-from fleet2.sim.backtest import COSTS, MIN_TRADE_DOLLARS, Limits as SimLimits, _cap_targets
+from fleet2.sim.backtest import COSTS, Limits as SimLimits, rebalance_trades
 
 log = logging.getLogger(__name__)
 OPEN_ORDER = ("submitting", "submitted", "partially_filled")
@@ -160,24 +161,21 @@ def receive_signal(conn: psycopg.Connection, worker_id: str, body: dict[str, Any
 def plan_orders(book: dict[str, Any], held: dict[str, float], prices: dict[str, float], weights: dict[str, float],
                 limits: Limits) -> list[dict[str, Any]]:
     """The orders that move the book from what it holds to the model's weights, sized
-    like the backtester: weight x book value, capped per position and per model, and
-    no order under $25 (except selling a position out entirely). Sells come first."""
-    values = {s: q * prices[s] for s, q in held.items() if s in prices}
+    by the backtester's own rebalance_trades: weight x book value, capped per position
+    and per model, no order under $25 (except selling a position out entirely), and a
+    held position resized only when 20% of its target away. Sells come first."""
+    values = {s: q * prices[s] for s, q in held.items() if s in prices and q > 0}
     equity = book["cash"] + sum(values.values())
     tradable = {s: w for s, w in weights.items() if s in prices}
-    wanted = _cap_targets(tradable, equity, _sim_limits(limits))
     orders = []
-    for symbol in sorted(set(held) | set(wanted)):
-        if symbol not in prices:
-            continue
-        have, want = values.get(symbol, 0.0), wanted.get(symbol, 0.0)
-        if want == 0.0 and held.get(symbol, 0.0) > 0:
+    for symbol, delta in sorted(rebalance_trades(values, tradable, equity, _sim_limits(limits)).items()):
+        have = values.get(symbol, 0.0)
+        if delta > 0:
+            orders.append({"symbol": symbol, "side": "buy", "notional": round(delta, 2), "delta": delta})
+        elif delta <= -have:  # sell out entirely
             orders.append({"symbol": symbol, "side": "sell", "qty": held[symbol], "delta": -have})
-        elif want - have >= MIN_TRADE_DOLLARS:
-            orders.append({"symbol": symbol, "side": "buy", "notional": round(want - have, 2), "delta": want - have})
-        elif have - want >= MIN_TRADE_DOLLARS:
-            orders.append({"symbol": symbol, "side": "sell", "qty": held[symbol] * (have - want) / have,
-                           "delta": want - have})
+        else:
+            orders.append({"symbol": symbol, "side": "sell", "qty": held[symbol] * -delta / have, "delta": delta})
     return sorted(orders, key=lambda o: o["delta"])
 
 
