@@ -113,11 +113,14 @@ def run_backtest(
     bars_per_year: int = 252,
     progress: Progress | None = None,
     should_stop: Callable[[], bool] | None = None,
+    cost_multiplier: float = 1.0,
 ) -> Run:
     """Trade `model` from bar `start` to bar `stop - 1`. Bars before `start` are history
-    the model may look at (its warm-up), never traded."""
+    the model may look at (its warm-up), never traded. `cost_multiplier` scales every
+    fill's slippage and fees (2.0 = a stress test at double the usual costs)."""
     params = params_with_defaults(model, params)
-    costs = COSTS[data.market]
+    base = COSTS[data.market]
+    costs = Costs(base.slippage_bps * cost_multiplier, base.fee_bps * cost_multiplier)
     every = max(1, int(model.rebalance_every(params)))
     # A model symbol with no data at all is simply never tradable (no bar to fill at).
     rows = {s: data.row(s) for s in model.SYMBOLS if s in data.symbols}
