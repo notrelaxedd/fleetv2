@@ -1,6 +1,16 @@
 # Day trading for Topstep: plan
 
-Status: plan only, nothing built yet. Written 2026-10-08.
+Status: stages 1 to 6 built, 2026-10-08 (see README.md). Written 2026-10-08.
+
+What changed from this plan when it was built, by the owner's decisions:
+- Stage 6's shadow trading is real paper trading on Alpaca: each micro contract is traded
+  as its SPY or QQQ share equivalent in the Alpaca paper account (1 MES = 50 SPY shares,
+  1 MNQ = 82 QQQ shares), and the checklist's last line counts those days.
+- Topstep trading is through the TopstepX API, behind keys in .env, a typed confirmation
+  and a restart, and only for models whose whole checklist is ticked. The dashboard also
+  lists live signals for trading by hand.
+- The simulator gives up a Combine attempt after 60 trading days (combine_max_days), so
+  no attempt is cut short by the end of the prices.
 
 Goal: find day-trading models that are likely to earn Topstep payouts, and be honest
 about the ones that are not. The fleet keeps doing what it does now (search, backtest,

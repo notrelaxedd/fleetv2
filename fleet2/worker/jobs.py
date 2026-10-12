@@ -7,7 +7,8 @@ true between units. progress is 0..1, or None for a job with no end (paper tradi
 shows "Live"). detail is the one line the Fleet card shows under the task name.
 
 Kinds: sleep (a test job for watching progress on the Fleet screen), data_refresh,
-backtest, paper_trade and model_search.
+backtest, paper_trade, model_search and final_check. A backtest of a futures model and
+a model search on the futures market run the futures versions (fleet2/worker/futures_*).
 """
 
 from __future__ import annotations
@@ -50,21 +51,39 @@ def run_data_refresh(params: dict[str, Any], checkpoint: dict[str, Any] | None, 
 
 
 def run_backtest(params: dict[str, Any], checkpoint: dict[str, Any] | None, emit: Emit, should_stop: ShouldStop) -> Any:
+    if params.get("market") == "futures":
+        from fleet2.worker.futures_jobs import run_futures_backtest
+
+        return run_futures_backtest(params, checkpoint, emit, should_stop)
     from fleet2.worker.backtest_job import run_backtest_job
 
     return run_backtest_job(params, checkpoint, emit, should_stop)
 
 
 def run_paper_trade(params: dict[str, Any], checkpoint: dict[str, Any] | None, emit: Emit, should_stop: ShouldStop) -> Any:
+    if params.get("market") == "futures":  # Alpaca paper or Topstep
+        from fleet2.worker.futures_live_job import run_futures_live
+
+        return run_futures_live(params, checkpoint, emit, should_stop)
     from fleet2.worker.paper_job import run_paper_trade as run
 
     return run(params, checkpoint, emit, should_stop)
 
 
 def run_model_search(params: dict[str, Any], checkpoint: dict[str, Any] | None, emit: Emit, should_stop: ShouldStop) -> Any:
+    if params.get("markets") == ["futures"]:
+        from fleet2.worker.futures_search_job import run_futures_search
+
+        return run_futures_search(params, checkpoint, emit, should_stop)
     from fleet2.worker.search_job import run_search
 
     return run_search(params, checkpoint, emit, should_stop)
+
+
+def run_final_check(params: dict[str, Any], checkpoint: dict[str, Any] | None, emit: Emit, should_stop: ShouldStop) -> Any:
+    from fleet2.worker.futures_jobs import run_final_check as run
+
+    return run(params, checkpoint, emit, should_stop)
 
 
 JOBS: dict[str, JobFunc] = {
@@ -73,4 +92,5 @@ JOBS: dict[str, JobFunc] = {
     "backtest": run_backtest,
     "paper_trade": run_paper_trade,
     "model_search": run_model_search,
+    "final_check": run_final_check,
 }

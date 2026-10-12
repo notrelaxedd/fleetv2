@@ -1,13 +1,13 @@
 """Model routes: workers report backtest results; the owner lists models."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import psycopg
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from coordinator import auth, models, search
+from coordinator import ai_ideas, ai_reviews, auth, futures_models, models, search
 from coordinator.errors import BadRequest
 from coordinator.api.deps import DB, bearer, require_owner
 from coordinator.api.limits import small_payload
@@ -68,6 +68,156 @@ def report_found(body: FoundBody, token: str = Depends(bearer), conn: psycopg.Co
     return search.store_found(conn, worker["id"], body.model_dump())
 
 
+class FuturesFoundBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    job_id: str | None = Field(default=None, max_length=64)
+    module: str = Field(max_length=64)
+    params: dict[str, Any]
+    train_score: float = Field(allow_inf_nan=False)
+    seed: str | None = Field(default=None, max_length=200)
+    parent: str | None = Field(default=None, max_length=128)
+    metrics: dict[str, Any]
+
+    @field_validator("metrics")
+    @classmethod
+    def _small(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return small_payload(value, "metrics")
+
+
+@worker_router.post("/futures")
+def report_found_futures(body: FuturesFoundBody, token: str = Depends(bearer), conn: psycopg.Connection = DB) -> dict[str, Any]:
+    """A futures model a model search job found (kept, replacing one, or dropped)."""
+    worker = auth.worker_for_token(conn, token)
+    return futures_models.store_found(conn, worker["id"], body.model_dump())
+
+
+@worker_router.get("/kept")
+def kept_models(market: str = "futures", token: str = Depends(bearer), conn: psycopg.Connection = DB) -> list[dict[str, Any]]:
+    """The futures models search has kept: next round's small changes start from them."""
+    auth.worker_for_token(conn, token)
+    if market != "futures":
+        raise BadRequest("only futures searches ask for their kept models")
+    return jsonable(futures_models.kept_models(conn))
+
+
+class FinalCheckBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    job_id: str = Field(max_length=64)
+    feed: str = Field(default="", max_length=32)
+    result: dict[str, Any]
+
+    @field_validator("result")
+    @classmethod
+    def _small(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return small_payload(value, "result")
+
+
+@worker_router.post("/{model_id}/final-check")
+def report_final_check(model_id: str, body: FinalCheckBody, token: str = Depends(bearer),
+                       conn: psycopg.Connection = DB) -> dict[str, Any]:
+    """A Final check's lockbox result, kept forever."""
+    worker = auth.worker_for_token(conn, token)
+    return futures_models.store_final_check(conn, model_id, worker["id"], body.model_dump())
+
+
+@owner_router.post("/{model_id}/review", status_code=201)
+def ask_review(model_id: str, request: Request, conn: psycopg.Connection = DB) -> dict[str, Any]:
+    """Ask Claude Haiku to review one futures model's results (advice only)."""
+    if not request.app.state.ai_key:
+        raise BadRequest("Add ANTHROPIC_API_KEY to .env on box1 first")
+    if not request.app.state.ai.review_enabled:
+        raise BadRequest("Reviews are turned off in config/ai.toml")
+    try:
+        return ai_reviews.request(conn, model_id, "owner")
+    except ValueError as exc:
+        raise BadRequest(str(exc)) from None
+
+
+@owner_router.post("/{model_id}/final-check", status_code=201)
+def start_final_check(model_id: str, request: Request, conn: psycopg.Connection = DB) -> dict[str, Any]:
+    """Open the lockbox for one futures model, once."""
+    return jsonable(futures_models.start_final_check(conn, model_id, request.app.state.topstep))
+
+
+class TriesBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    job_id: str | None = Field(default=None, max_length=64)
+    tries: dict[str, dict[str, float]]
+    # Per recipe tried this round: its TRAINING numbers only (see coordinator.ai_ideas).
+    recipes: list[dict[str, Any]] = Field(default_factory=list, max_length=200)
+
+
+class IdeasBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    job_id: str | None = Field(default=None, max_length=64)
+    take: int = Field(default=0, ge=0, le=20)
+
+
+worker_search_router = APIRouter(prefix="/api/v1/search", tags=["search"])
+
+
+@worker_search_router.post("/tries")
+def report_tries(body: TriesBody, token: str = Depends(bearer), conn: psycopg.Connection = DB) -> dict[str, Any]:
+    """How many futures settings a search round tried, per model file."""
+    auth.worker_for_token(conn, token)
+    futures_models.add_tries(conn, body.tries)
+    if body.recipes:
+        ai_ideas.record_results(conn, body.job_id, body.recipes)
+    return {"ok": True}
+
+
+@worker_search_router.post("/ideas")
+def take_ideas(body: IdeasBody, request: Request, token: str = Depends(bearer),
+               conn: psycopg.Connection = DB) -> list[dict[str, Any]]:
+    """Recipes Claude Haiku wrote, for a futures search round to try (at most per_round in
+    config/ai.toml; none while Haiku is off)."""
+    auth.worker_for_token(conn, token)
+    settings = request.app.state.ai
+    count = min(body.take, settings.per_round) if settings.enabled and request.app.state.ai_key else 0
+    return ai_ideas.take(conn, body.job_id, count)
+
+
+class TrialBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    params: dict[str, Any] = Field(default_factory=dict)
+    score: float | None = None  # a score that is not a finite number is stored as none
+    rejected: str | None = Field(default=None, max_length=1000)
+    metrics: dict[str, Any] | None = None
+
+    @field_validator("params", "metrics")
+    @classmethod
+    def _small(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        return small_payload(value, "trial")
+
+
+class LogBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    job_id: str | None = Field(default=None, max_length=64)
+    market: Literal["stocks", "crypto", "futures"]
+    family: str = Field(min_length=1, max_length=128)
+    trials: list[TrialBody] = Field(max_length=search.MAX_TRIALS_PER_CALL)
+
+
+@worker_search_router.post("/log")
+def post_log(body: LogBody, token: str = Depends(bearer), conn: psycopg.Connection = DB) -> dict[str, Any]:
+    """The settings a search round tried (up to 1000), with their training scores and why
+    each was thrown away; metrics keep compact numbers only (curves and daily arrays are
+    stripped)."""
+    worker = auth.worker_for_token(conn, token)
+    stored = search.log_trials(conn, worker["id"], body.job_id, body.market, body.family,
+                               [t.model_dump() for t in body.trials])
+    return {"stored": stored}
+
+
+@worker_search_router.get("/log")
+def get_log(request: Request, market: str, family: str, token: str = Depends(bearer),
+            conn: psycopg.Connection = DB) -> dict[str, Any]:
+    """What the log knows about one model file or recipe: counts, best score, whether it
+    gave up, and its best 200 trials plus its 300 latest."""
+    auth.worker_for_token(conn, token)
+    return jsonable(search.family_log(conn, market, family, request.app.state.topstep))
+
+
 class SearchBody(BaseModel):
     model_config = ConfigDict(extra="ignore")
     markets: list[str] | None = None
@@ -80,9 +230,9 @@ search_router = APIRouter(prefix="/api/search", tags=["search"], dependencies=[D
 @search_router.post("/start", status_code=201)
 def start_search(request: Request, body: SearchBody | None = None, conn: psycopg.Connection = DB) -> dict[str, Any]:
     body = body or SearchBody()
-    if body.markets and not set(body.markets) <= {"stocks", "crypto"}:
-        raise BadRequest("markets must be stocks and/or crypto")
-    return jsonable(search.start(conn, request.app.state.limits, body.markets, body.target))
+    if body.markets and body.markets != ["futures"] and not set(body.markets) <= {"stocks", "crypto"}:
+        raise BadRequest("markets must be stocks and/or crypto, or futures on its own")
+    return jsonable(search.start(conn, request.app.state.limits, body.markets, body.target, request.app.state.topstep))
 
 
 @search_router.post("/stop")

@@ -5,7 +5,15 @@ its own transaction; one failing never stops the others):
 - daily loss: pause all trading when the account is down more than the limit today
 - trading: turn models' decisions into orders and book fills
 - price data: keep the bars fresh for markets that have a model paper trading
-  (crypto every hour, stocks every few hours), so workers decide on current data
+  (crypto every hour, stocks every few hours), so workers decide on current data, and
+  for markets with news predictions waiting to be scored
+- news trading: open and close the news strategies' positions (its own task after the
+  models' orders, on this same thread, so fills are never booked by two threads at once)
+- news scoring: score predictions whose horizon has passed, every few minutes
+
+make_news_tasks() is the news engine's own loop (a second thread): fetch new articles
+from Alpaca's news feed and have Claude analyse them. Both are slow network calls, so
+they never run on the main loop.
 """
 from __future__ import annotations
 
@@ -16,17 +24,20 @@ from typing import Any, Callable
 
 from psycopg_pool import ConnectionPool
 
-from coordinator import data, safety, trading
+from coordinator import data, news_feed, news_scoring, news_trading, research, safety, trading
 from coordinator.broker import BrokerStatus
 from coordinator.limits import Limits
 from fleet2.universe import MARKETS
 
 log = logging.getLogger(__name__)
 REFRESH_EVERY_S = {"crypto": 15 * 60, "stocks": 3 * 3600}
+SCORE_EVERY_S = 10 * 60
+NEWS_POLL_EVERY_S = 60
 
 
 def make_tasks(status: BrokerStatus, limits: Limits, bar_source: Any) -> tuple[Callable[[ConnectionPool], None], ...]:
     last_refresh: dict[str, float] = {}
+    last_score = [-1e9]
 
     def broker_status(pool: ConnectionPool) -> None:
         status.refresh()
@@ -42,10 +53,29 @@ def make_tasks(status: BrokerStatus, limits: Limits, bar_source: Any) -> tuple[C
             trading.poll_fills(conn, status)
             trading.execute_pass(conn, status, limits)
 
+    def trade_news(pool: ConnectionPool) -> None:
+        # Its own task, so a failure in the models' executor never stops news stops and
+        # covers from being watched. Same thread, so fills are still booked by one thread.
+        if not status.broker.connected:
+            return
+        with pool.connection() as conn:
+            news_trading.news_pass(conn, status, limits, bar_source.latest_prices, datetime.now(timezone.utc))
+
+    def score_news(pool: ConnectionPool) -> None:
+        now = time.monotonic()
+        if now - last_score[0] < SCORE_EVERY_S:
+            return
+        last_score[0] = now
+        with pool.connection() as conn:
+            scored = news_scoring.score_pending(conn, limits, datetime.now(timezone.utc))
+        if scored:
+            log.info("news scoring: %d prediction(s) scored", scored)
+
     def fresh_prices(pool: ConnectionPool) -> None:
         with pool.connection() as conn:
             markets = [r["market"] for r in conn.execute(
-                "SELECT DISTINCT m.market FROM books b JOIN models m ON m.id = b.model_id WHERE b.status = 'active'")]
+                "SELECT DISTINCT m.market FROM books b JOIN models m ON m.id = b.model_id WHERE b.status = 'active'"
+                " UNION SELECT DISTINCT market FROM news_predictions WHERE scored_at IS NULL AND direction <> 'none'")]
         now = time.monotonic()
         for market in markets:
             if now - last_refresh.get(market, -1e9) < REFRESH_EVERY_S[market]:
@@ -53,7 +83,33 @@ def make_tasks(status: BrokerStatus, limits: Limits, bar_source: Any) -> tuple[C
             last_refresh[market] = now
             refresh_market(pool, bar_source, market)
 
-    return (broker_status, daily_loss, trade, fresh_prices)
+    return (broker_status, daily_loss, trade, trade_news, fresh_prices, score_news)
+
+
+def make_news_tasks(news_source: Any, analyst: Any, settings: Any, bar_source: Any) -> tuple[Callable[[ConnectionPool], None], ...]:
+    """The news thread's tasks: fetch new articles every minute, and have Claude analyse
+    the waiting ones a few at a time (each call takes seconds)."""
+    last_poll = [-1e9]
+
+    def fetch_news(pool: ConnectionPool) -> None:
+        if not news_source.connected:
+            return
+        now = time.monotonic()
+        if now - last_poll[0] < NEWS_POLL_EVERY_S:
+            return
+        last_poll[0] = now
+        with pool.connection() as conn:
+            step = news_feed.poll_step(conn, news_source, datetime.now(timezone.utc))
+        if step.get("error"):
+            log.warning("news feed: %s", step["error"])
+
+    def analyse_news(pool: ConnectionPool) -> None:
+        if not analyst.connected or not settings.news_enabled:
+            return
+        with pool.connection() as conn:
+            research.analyse_pending(conn, analyst, settings, datetime.now(timezone.utc), bar_source.latest_prices)
+
+    return (fetch_news, analyse_news)
 
 
 def refresh_market(pool: ConnectionPool, bar_source: Any, market: str, max_steps: int = 50) -> int:
@@ -71,3 +127,143 @@ def refresh_market(pool: ConnectionPool, bar_source: Any, market: str, max_steps
     if added:
         log.info("price refresh %s: %d new bars", market, added)
     return added
+
+
+def make_futures_tasks(venues: Any, rules: Any, limits: Limits) -> tuple[Callable[[ConnectionPool], None], ...]:
+    """Futures models trading (coordinator.futures_trading), each in its own transaction:
+
+    - live prices: every few seconds while a futures book trades and the session is open,
+      the newest closed minutes of each place's own prices (futures_live)
+    - trade: book fills, move each book to what its model wants, value today's dips
+    - Topstep: the account's balance and loss floor every 30 s (pausing Topstep trading at
+      its safety margin) and the balance at the end of each day
+    """
+    from coordinator import futures_live, futures_trading
+
+    last: dict[str, float] = {}
+
+    def live_prices(pool: ConnectionPool) -> None:
+        now_m = time.monotonic()
+        if now_m - last.get("prices", -1e9) < futures_live.REFRESH_S:
+            return
+        last["prices"] = now_m
+        now = datetime.now(timezone.utc)
+        with pool.connection() as conn:
+            rows = conn.execute("SELECT DISTINCT venue FROM futures_books WHERE status IN ('active', 'closing')").fetchall()
+            for r in rows:
+                name = futures_live.source_for(r["venue"], venues.fake)
+                source = venues.sources.get(name)
+                if source is None:
+                    continue
+                empty = futures_live.latest(conn, name, "MES") is None
+                if not (empty or futures_live.session_window(now)):
+                    continue
+                for symbol in MARKETS_FUTURES:
+                    try:
+                        futures_live.refresh(conn, name, source, symbol, now)
+                        conn.commit()
+                    except Exception as exc:  # noqa: BLE001 - reported, retried next time
+                        conn.rollback()
+                        log.warning("live futures prices %s %s: %s", name, symbol, exc)
+
+    def trade(pool: ConnectionPool) -> None:
+        with pool.connection() as conn:
+            if not conn.execute("SELECT 1 FROM futures_books WHERE status IN ('active', 'closing') LIMIT 1").fetchone():
+                return
+            futures_trading.poll_fills(conn, venues, rules)
+            futures_trading.execute_pass(conn, venues, rules, limits)
+            futures_trading.mark_days(conn, venues)
+
+    def topstep_account(pool: ConnectionPool) -> None:
+        now_m = time.monotonic()
+        if not venues.topstep.on or now_m - last.get("topstep", -1e9) < 30:
+            return
+        last["topstep"] = now_m
+        with pool.connection() as conn:
+            try:
+                venues.topstep_state = futures_trading.topstep_check(conn, venues, rules)
+            except Exception as exc:  # noqa: BLE001
+                conn.rollback()
+                venues.topstep_state = {"error": str(exc)[:200]}
+                log.warning("Topstep account check: %s", exc)
+
+    return (live_prices, trade, topstep_account)
+
+
+def make_ai_tasks(settings: Any, key: str, rules: Any = None, news: Any = None) -> tuple[Callable[[ConnectionPool], None], ...]:
+    """Claude Haiku, all within the monthly cap in config/ai.toml, nothing without a key:
+
+    - recipes (coordinator.ai_ideas): at most once a minute, while a futures search runs
+      and too few recipes wait, one call for new recipes
+    - reviews (coordinator.ai_reviews): once a minute, queue the reviews that are due and
+      write one (the owner's requests first)
+    - market note (coordinator.market_note): on a trading day from note_time Chicago
+      time, today's note (a failed news read is tried again ten minutes later)
+    """
+    from coordinator import ai_ideas, ai_reviews, market_note
+
+    if not key:
+        return ()
+    last = {"t": -1e9, "reviews": -1e9, "note": -1e9}
+
+    def recipes(pool: ConnectionPool) -> None:
+        now_m = time.monotonic()
+        if now_m - last["t"] < 60:
+            return
+        last["t"] = now_m
+        with pool.connection() as conn:
+            try:
+                result = ai_ideas.write_recipes(conn, settings, key)
+                conn.commit()
+            except Exception as exc:  # noqa: BLE001 - reported, tried again next minute
+                conn.rollback()
+                log.warning("Claude Haiku recipes: %s", exc)
+                return
+        if result.get("written"):
+            log.info("Claude Haiku wrote %d recipe(s) for $%.4f", result["written"], result.get("cost") or 0.0)
+
+    def reviews(pool: ConnectionPool) -> None:
+        now_m = time.monotonic()
+        if rules is None or now_m - last["reviews"] < 60:
+            return
+        last["reviews"] = now_m
+        with pool.connection() as conn:
+            try:
+                result = ai_reviews.tick(conn, settings, key, rules)
+                conn.commit()
+            except Exception as exc:  # noqa: BLE001 - reported, tried again next minute
+                conn.rollback()
+                log.warning("Claude Haiku reviews: %s", exc)
+                return
+        if result.get("reviewed") and not result.get("error"):
+            log.info("Claude Haiku reviewed %s", result["reviewed"])
+
+    def note(pool: ConnectionPool) -> None:
+        now_m = time.monotonic()
+        if news is None or now_m - last["note"] < 60:
+            return
+        last["note"] = now_m
+        with pool.connection() as conn:
+            try:
+                result = market_note.write_note(conn, settings, key, news)
+                conn.commit()
+            except Exception as exc:  # noqa: BLE001 - reported, tried again
+                conn.rollback()
+                log.warning("market note: %s", exc)
+                return
+        if result.get("error"):
+            last["note"] = now_m + 540  # wait ten minutes before the next try
+        elif result.get("written"):
+            log.info("Claude Haiku wrote the market note for %s", result["day"])
+
+    out = []
+    if settings.enabled:
+        out.append(recipes)
+    if settings.review_enabled:
+        out.append(reviews)
+    if settings.note_enabled:
+        out.append(note)
+    return tuple(out)
+
+
+MARKETS_FUTURES = ("MES", "MNQ")

@@ -17,11 +17,11 @@ import pytest
 
 from fleet2.models import REGISTRY
 from fleet2.models.base import BadTargets, clean_targets
-from fleet2.sim.backtest import (COSTS, MIN_TRADE_DOLLARS, Costs, Limits, Run, Trade, buy_and_hold,
-                                 run_backtest, split_index)
+from fleet2.sim.backtest import (COSTS, MIN_TRADE_DOLLARS, REBALANCE_BAND, Costs, Limits, Run, Trade,
+                                 buy_and_hold, run_backtest, split_index)
 from fleet2.sim.control import JobStopped
 from fleet2.sim.marketdata import History, MarketData
-from fleet2.sim.metrics import MIN_TRADES, curve, max_drawdown, sharpe, summarize
+from fleet2.sim.metrics import MIN_TRADES, beta_alpha, curve, max_drawdown, sharpe, summarize, t_stat
 from fleet2.universe import MARKETS
 from fleet2.worker.backtest_job import backtest_periods, signed_pct, summary_line
 
@@ -80,6 +80,7 @@ def test_cost_rates_match_the_owners_spec():
     assert STOCK_RATE == pytest.approx(0.0005)
     assert CRYPTO_RATE == pytest.approx(0.0035)
     assert MIN_TRADE_DOLLARS == 25.0
+    assert REBALANCE_BAND == 0.20
     assert Limits() == Limits(money=10_000.0, max_per_position=1_000.0, max_per_model=10_000.0)
 
 
@@ -290,6 +291,7 @@ def test_random_strategy_never_goes_short_or_borrows(seed):
     rng = np.random.default_rng(seed + 100)
     limits = Limits(money=5_000, max_per_position=900, max_per_model=2_500)
     observed = []
+    before: dict[str, float] = {}
 
     def random_weights(history, params):
         # The caller's frame is run_backtest: read its cash and share book to audit it.
@@ -301,8 +303,18 @@ def test_random_strategy_never_goes_short_or_borrows(seed):
         assert all(q >= 0 for q in shares.values()), f"negative shares at bar {i}: {shares}"
         if i > 0:  # what is held, at the open prices the last orders were filled at
             held = {s: q * data.open[data.row(s), i - 1] for s, q in shares.items()}
-            assert all(v <= limits.max_per_position + MIN_TRADE_DOLLARS for v in held.values()), held
-            assert sum(held.values()) <= limits.max_per_model + MIN_TRADE_DOLLARS * n_sym, held
+            # A position left alone inside the rebalance band may sit up to 20% over its
+            # target (price drift is not traded) ...
+            loose = max(limits.max_per_position + MIN_TRADE_DOLLARS, limits.max_per_position * (1 + REBALANCE_BAND))
+            assert all(v <= loose for v in held.values()), held
+            # ... but a buy never takes a position past its cap, nor the model past its
+            # total (the trims the band held back are made first).
+            bought = {s for s, q in shares.items() if q > before.get(s, 0.0) + 1e-12}
+            assert all(held[s] <= limits.max_per_position + 1e-6 for s in bought), held
+            if bought:
+                assert sum(held.values()) <= limits.max_per_model + MIN_TRADE_DOLLARS * n_sym, held
+        before.clear()
+        before.update(shares)
         w = rng.dirichlet(np.ones(n_sym + 1))[:n_sym]  # sums to < 1, some mass kept as cash
         w = np.where(rng.random(n_sym) < 0.3, 0.0, w)
         return {s: float(x) for s, x in zip(symbols, w)}
@@ -417,14 +429,14 @@ def test_sells_are_filled_before_buys_so_a_switch_is_funded_by_the_sale():
 
 
 # ---------------------------------------------------------------------------------------
-# 5. MIN_TRADE_DOLLARS
+# 5. MIN_TRADE_DOLLARS and the rebalance band (more in tests/test_rebalance_band.py)
 # ---------------------------------------------------------------------------------------
 
 def _small_limits():
     return Limits(money=1000, max_per_position=1000, max_per_model=1000)
 
 
-def test_a_target_change_under_25_dollars_does_not_trade():
+def test_a_target_change_under_25_dollars_and_inside_the_band_does_not_trade():
     data = make_data("stocks", {"AAPL": [100.0] * 4})
     # Buy 0.5 (~$500); equity is then 999.75, so 0.52 wants $519.87: only +$20.12 more.
     model = fake_model(("AAPL",), {0: {"AAPL": 0.5}, 1: {"AAPL": 0.52}}, every=1)
@@ -438,14 +450,22 @@ def test_a_target_change_under_25_dollars_does_not_trade():
     assert run.costs_paid == pytest.approx(500.0 / (1 + STOCK_RATE) * STOCK_RATE * 2)
 
 
-def test_a_target_change_of_25_dollars_or_more_does_trade():
+def test_a_target_change_beyond_the_rebalance_band_does_trade():
+    data = make_data("stocks", {"AAPL": [100.0] * 4})
+    model = fake_model(("AAPL",), {0: {"AAPL": 0.5}, 1: {"AAPL": 0.7}}, every=1)
+    run = run_backtest(data, model, None, 0, 4, _small_limits())
+    equity_before = 500.0 + 500.0 / (1 + STOCK_RATE)          # 999.75, marked at bar 0's close
+    extra = 0.7 * equity_before - 500.0 / (1 + STOCK_RATE) * 1.0  # target minus what is held (at 100)
+    assert extra >= max(MIN_TRADE_DOLLARS, REBALANCE_BAND * 0.7 * equity_before)
+    assert run.trades[0].cost == pytest.approx(500.0 + extra)
+
+
+def test_a_target_change_of_25_dollars_inside_the_band_does_not_trade():
+    # 0.5 -> 0.55 is ~$50 more: over the $25 minimum but under 20% of the $550 target.
     data = make_data("stocks", {"AAPL": [100.0] * 4})
     model = fake_model(("AAPL",), {0: {"AAPL": 0.5}, 1: {"AAPL": 0.55}}, every=1)
     run = run_backtest(data, model, None, 0, 4, _small_limits())
-    equity_before = 500.0 + 500.0 / (1 + STOCK_RATE)          # 999.75, marked at bar 0's close
-    extra = 0.55 * equity_before - 500.0 / (1 + STOCK_RATE) * 1.0  # target minus what is held (at 100)
-    assert extra >= MIN_TRADE_DOLLARS
-    assert run.trades[0].cost == pytest.approx(500.0 + extra)
+    assert run.trades[0].cost == pytest.approx(500.0)
 
 
 def test_small_first_buys_are_skipped_too():
@@ -958,3 +978,38 @@ def test_should_stop_raises_job_stopped_and_progress_ends_at_one():
     with pytest.raises(JobStopped):
         run_backtest(data, always("AAPL", every=5), None, 0, 120, should_stop=lambda: calls.append(1) or len(calls) > 10)
     assert len(calls) == 11
+
+
+def test_t_stat_is_the_sharpe_ratio_times_the_root_of_the_years_tested():
+    rng = np.random.default_rng(5)
+    equity = 100.0 * np.cumprod(1.0 + rng.normal(0.001, 0.01, 504))
+    s = summarize(make_run(equity))
+    assert s["years"] == pytest.approx(2.0)
+    assert s["t_stat"] == pytest.approx(s["sharpe"] * np.sqrt(2.0))
+    # the same thing as the mean per-bar return over its standard error
+    full = np.concatenate(([100.0], equity))
+    r = np.diff(full) / full[:-1]
+    assert s["t_stat"] == pytest.approx(np.mean(r) / np.std(r, ddof=1) * np.sqrt(r.shape[0]))
+    assert t_stat(None, 504, 252) is None and t_stat(1.0, 0, 252) is None
+    assert summarize(make_run([100.0, 100.0, 100.0]))["t_stat"] is None  # no ups and downs
+
+
+def test_beta_and_alpha_recover_a_known_exposure():
+    rng = np.random.default_rng(11)
+    rb = rng.normal(0.0005, 0.01, 400)
+    rm = 0.5 * rb + 0.0002  # half the market's moves, plus 0.02% a bar of its own
+    bench = 100.0 * np.cumprod(np.concatenate(([1.0], 1.0 + rb)))
+    model = 100.0 * np.cumprod(np.concatenate(([1.0], 1.0 + rm)))
+    beta, alpha = beta_alpha(model, bench, 252)
+    assert beta == pytest.approx(0.5)
+    assert alpha == pytest.approx(0.0002 * 252)
+    s = summarize(make_run(model[1:], benchmark=bench[1:]))
+    assert s["beta"] == pytest.approx(0.5) and s["alpha"] == pytest.approx(0.0002 * 252)
+
+
+def test_beta_and_alpha_are_none_without_a_benchmark_or_without_benchmark_moves():
+    s = summarize(make_run([100.0, 101.0, 99.0, 102.0, 103.0]))
+    assert s["beta"] is None and s["alpha"] is None
+    s = summarize(make_run([100.0, 101.0, 99.0, 102.0, 103.0], benchmark=[100.0] * 5))
+    assert s["beta"] is None and s["alpha"] is None
+    assert beta_alpha(np.array([100.0, 101.0]), np.array([100.0, 102.0]), 252) == (None, None)

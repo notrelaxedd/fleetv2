@@ -11,20 +11,23 @@ NAME = "Crypto structure"
 MARKET = "crypto"
 DESCRIPTION = "Holds a coin after its price closes above its last swing high and sells when it closes below its last swing low."
 HOW_IT_WORKS = (
-    "It marks each coin's recent swing highs and lows, the peaks and dips that stand out from the bars around them, "
-    "and only counts one once a few later bars have closed and proved it. "
-    "When the price closes above the last swing high the trend has turned up, so it holds that coin; "
-    "when it closes below the last swing low the trend has turned down, so it sells and waits in cash."
+    "About once a day it marks each coin's swing highs and lows on hourly prices, the peaks and dips that stand "
+    "out from the bars around them, counting one only once a few later bars have closed and proved it. "
+    "When the price has closed above the last swing high the trend has turned up, so it holds that coin. "
+    "When it has closed below the last swing low the trend has turned down, so it sells and waits in cash."
 )
 SYMBOLS = CRYPTO
-DEFAULT_PARAMS: dict[str, Any] = {"swing_left": 5, "swing_right": 3, "min_break_atr": 0.2, "lookback": 240,
-                                  "rebalance_every": 2, "max_coins": 8}
+# Decides about daily on swings two days wide: every crypto fill costs about 35 bp, and on
+# zero-edge random-walk prices half-day swings paid ~$2,900 a year in fees on $10,000,
+# against ~$1,000 (as much as Crypto trend) with these defaults.
+DEFAULT_PARAMS: dict[str, Any] = {"swing_left": 48, "swing_right": 24, "min_break_atr": 0.5, "lookback": 720,
+                                  "rebalance_every": 24, "max_coins": 8}
 SEARCH_SPACE = {
-    "swing_left": (2, 12, "int"),
-    "swing_right": (1, 8, "int"),
+    "swing_left": (8, 72, "int"),
+    "swing_right": (4, 36, "int"),
     "min_break_atr": (0.0, 1.0, "float"),
-    "lookback": (120, 720, "int"),
-    "rebalance_every": (1, 12, "int"),
+    "lookback": (240, 1440, "int"),
+    "rebalance_every": (12, 72, "int"),
     "max_coins": (3, 8, "int"),
 }
 # The typical bar size a break is measured against: the average high-low range of the last day.

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from types import ModuleType
 
-from fleet2.models import crypto_structure, crypto_trend, dip_buy, momentum, pairs
+from fleet2.models import crypto_structure, crypto_trend, dip_buy, low_vol, momentum, near_high, pairs, reversal
 
 REGISTRY: dict[str, ModuleType] = {
     "momentum": momentum,
@@ -15,12 +15,20 @@ REGISTRY: dict[str, ModuleType] = {
     "crypto_trend": crypto_trend,
     "crypto_structure": crypto_structure,
     "pairs": pairs,
+    "reversal": reversal,
+    "near_high": near_high,
+    "low_vol": low_vol,
 }
 
 
 def get_module(name: str) -> ModuleType:
-    """The model file by name; KeyError names the known ones."""
+    """The model file by name (stock and crypto files, then futures files); KeyError
+    names the known ones."""
+    from fleet2.models.futures import REGISTRY as FUTURES
+    from fleet2.models.futures import get_module as futures_module
+
     try:
-        return REGISTRY[name]
+        return REGISTRY[name] if name in REGISTRY else futures_module(name)
     except KeyError:
-        raise KeyError(f"unknown model file {name!r} (known: {', '.join(sorted(REGISTRY))})") from None
+        known = ", ".join(sorted(REGISTRY) + sorted(FUTURES))
+        raise KeyError(f"unknown model file {name!r} (known: {known})") from None

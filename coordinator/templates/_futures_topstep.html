@@ -1,0 +1,19 @@
+<p class="small ftopstep" data-topstep-text data-state="{{ topstep.state }}">{{ topstep.text }}</p>
+{% if topstep.paused %}
+<p class="small fnote" data-topstep-paused>{{ topstep.paused }}</p>
+<button type="button" class="btn wide" data-action="topstep-resume">Resume Topstep trading</button>
+{% endif %}
+{% if topstep.confirm %}
+<form class="tconfirm" data-topstep-form>
+  <label class="sr-only" for="topstep-phrase">Confirmation</label>
+  <input id="topstep-phrase" data-topstep-phrase autocomplete="off" placeholder="Type {{ topstep.phrase }}">
+  <button type="submit" class="btn" data-action="topstep-confirm">Confirm</button>
+</form>
+{% endif %}
+{% if signals %}
+<div class="fsignals" data-signals>
+  <h3 class="section">Live signals</h3>
+  <ul>{% for s in signals %}<li data-signal-row><strong>{{ s.model }}</strong> ({{ s.venue }}): {{ s.signal }}</li>{% endfor %}</ul>
+  <p class="muted small">To trade by hand on TopstepX, follow these.</p>
+</div>
+{% endif %}

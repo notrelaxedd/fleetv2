@@ -54,17 +54,30 @@
         return;
       }
       var target = $('[data-region="' + name + '"]');
-      if (target && target.innerHTML !== fresh.innerHTML) { target.innerHTML = fresh.innerHTML; }
+      if (target && target.innerHTML !== fresh.innerHTML) {
+        // Keep the <details> the owner opened (News screen) open across the swap.
+        var open = Array.prototype.map.call(target.querySelectorAll("details[open][data-key]"), function (d) { return d.getAttribute("data-key"); });
+        target.innerHTML = fresh.innerHTML;
+        open.forEach(function (key) {
+          var d = target.querySelector('details[data-key="' + key + '"]');
+          if (d) { d.open = true; }
+        });
+      }
     });
   }
 
   // The Fleet screen refreshes /fragments/fleet; the Models screen refreshes /fragments/models for the
   // model that is selected on the page (so the selection stays put even when the ranking moves).
   function fragmentUrl() {
+    if ($("[data-news-screen]")) { return "/fragments/news"; }
     var screen = $("[data-models-screen]");
     if (!screen) { return "/fragments/fleet"; }
     var id = screen.getAttribute("data-selected-id");
-    return "/fragments/models" + (id ? "?id=" + encodeURIComponent(id) : "");
+    var query = [];
+    if (screen.getAttribute("data-market")) { query.push("market=" + encodeURIComponent(screen.getAttribute("data-market"))); }
+    if (screen.getAttribute("data-all")) { query.push("all=1"); }
+    if (id) { query.push("id=" + encodeURIComponent(id)); }
+    return "/fragments/models" + (query.length ? "?" + query.join("&") : "");
   }
 
   function refresh() {
@@ -130,8 +143,26 @@
   function modelsAction(button, action) {
     var id = button.dataset.modelId;
     var url, body, which = "model", done = "Done";
-    if (action === "search-start" || action === "search-stop") {
+    if (action === "news-start" || action === "news-stop") {
+      url = "/api/news/" + encodeURIComponent(button.dataset.market) + "/" + (action === "news-start" ? "start" : "stop");
+      which = "news";
+    } else if (action === "search-start" || action === "search-stop") {
       url = "/api/search/" + (action === "search-start" ? "start" : "stop");
+      if (action === "search-start" && button.dataset.market) { body = { markets: [button.dataset.market] }; }
+      which = "search";
+    } else if (action === "futures-prices") {
+      url = "/api/jobs";
+      body = { kind: "futures_prices", target: "auto" };
+      which = "search";
+    } else if (action === "final-check") {
+      url = "/api/models/" + encodeURIComponent(id) + "/final-check";
+    } else if (action === "ask-review") {
+      url = "/api/models/" + encodeURIComponent(id) + "/review";
+    } else if (action === "futures-start" || action === "futures-stop") {
+      url = "/api/models/" + encodeURIComponent(id) + "/futures/" + (action === "futures-start" ? "start" : "stop");
+      body = { venue: button.dataset.venue };
+    } else if (action === "topstep-resume") {
+      url = "/api/topstep/resume";
       which = "search";
     } else if (action === "run-backtest") {
       url = "/api/jobs";
@@ -160,7 +191,7 @@
         if (!r.ok) { toast(r.message, false); }
         return refresh();
       });
-    } else if (/^(search-(start|stop)|run-backtest|paper-(start|stop))$/.test(action)) {
+    } else if (/^(search-(start|stop)|run-backtest|paper-(start|stop)|news-(start|stop)|futures-prices|final-check|ask-review|futures-(start|stop)|topstep-resume)$/.test(action)) {
       modelsAction(button, action);
     } else if (action === "run-again") {
       button.disabled = true;
@@ -244,6 +275,16 @@
   });
 
   document.addEventListener("submit", function (e) {
+    if (!e.target.matches("[data-topstep-form]")) { return; }
+    e.preventDefault();
+    var input = $("[data-topstep-phrase]", e.target);
+    send("/api/topstep/confirm", { confirm: input.value.trim() }).then(function (r) {
+      reply("search", plainMessage(r, "Done"), r.ok);
+      if (r.ok) { input.value = ""; }
+    });
+  });
+
+  document.addEventListener("submit", function (e) {
     if (!e.target.matches('[data-live="confirm-form"]')) { return; }
     e.preventDefault();
     liveSend($('[data-action="live-confirm"]', e.target), "/api/live/confirm", { confirm: liveEl("phrase").value.trim() });
@@ -259,6 +300,13 @@
   document.addEventListener("click", function (e) {
     if (e.target.id === "live-panel") { liveClose(); }
   });
+
+  // On a phone the Models screen is one column with the details below the whole list, so a
+  // tapped model opens scrolled to its details instead of at the top of the list.
+  var opened = $("[data-model-detail]");
+  if (opened && /[?&]id=/.test(location.search) && window.matchMedia("(max-width: 900px)").matches) {
+    opened.scrollIntoView({ block: "start" });
+  }
 
   if (panel()) { showJob(); }
   setInterval(function () { if (!document.hidden) { refresh(); } }, REFRESH_MS);

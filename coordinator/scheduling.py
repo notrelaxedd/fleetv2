@@ -188,10 +188,25 @@ def run_again(conn: psycopg.Connection, job_id: Any) -> CreateResult:
     if not can_run_again(job):
         raise Conflict("this job cannot be run again; start it from the Models screen")
     params = dict(job["params"] or {})
+    if job["kind"] == "final_check" and conn.execute("SELECT 1 FROM final_checks WHERE model_id = %s",
+                                                     (job["model_id"],)).fetchone():
+        raise Conflict("This model's Final check result is already kept: it never runs again")
     if job["kind"] == "model_search":
         if conn.execute("SELECT 1 FROM jobs WHERE kind = 'model_search' AND status IN ('queued','leased','cancel_requested')").fetchone():
             raise Conflict("Model search is already running")
         params["seed"] = secrets.randbelow(10**9)
+    if job["kind"] == "paper_trade" and params.get("market") == "futures":
+        book = conn.execute("SELECT id FROM futures_books WHERE model_id = %s AND venue = %s AND status = 'active'",
+                            (job["model_id"], params.get("venue"))).fetchone()
+        if book is None:
+            raise Conflict("This model is not trading there any more; start it from the Models screen")
+        busy = conn.execute("SELECT 1 FROM jobs WHERE kind = 'paper_trade' AND model_id = %s AND status IN ('queued','leased')"
+                            " AND params->>'venue' = %s", (job["model_id"], params.get("venue"))).fetchone()
+        if busy:
+            raise Conflict("A worker is already running this model")
+        result = create_job(conn, job["kind"], params, AUTO, job["model_id"], retry_of=job["id"])
+        conn.execute("UPDATE futures_books SET job_id = %s WHERE id = %s", (result.jobs[0]["id"], book["id"]))
+        return result
     if job["kind"] == "paper_trade":
         book = conn.execute("SELECT id FROM books WHERE model_id = %s AND status = 'active'", (job["model_id"],)).fetchone()
         if book is None:

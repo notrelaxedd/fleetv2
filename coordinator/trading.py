@@ -7,16 +7,23 @@ How a model trades:
 2. The worker computes the model's target weights whenever a new bar closes and posts
    them here as a signal. Workers never see keys and never call Alpaca.
 3. The executor (coordinator background loop) turns the latest decision into orders,
-   sized exactly as the backtester sizes them (same caps, same $25 no-trade band),
-   and sends each through coordinator.safety.approve_and_place. Stock orders wait for
-   the market to open; crypto trades around the clock; nothing trades while paused.
+   sized exactly as the backtester sizes them (fleet2.sim.backtest.rebalance_trades:
+   same caps, same $25 minimum order, same 20% rebalance band), and sends each
+   through coordinator.safety.approve_and_place. Stock orders wait for the market to
+   open; crypto trades around the clock; nothing trades while paused.
 4. The fill poller books what Alpaca filled into the model's book.
 Stopping paper trading sells the model's positions (when trading is allowed) and then
 closes the book.
+
+The news strategies (models with origin 'news') also trade from books, but
+coordinator.news_trading places their orders: execute_pass leaves their books alone,
+and start/stop here refuse them. Only their books can hold a short (a negative qty);
+see _book_fill for how a short is booked.
 """
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -27,11 +34,11 @@ from coordinator.broker import BrokerStatus, BrokerUnavailable
 from coordinator.errors import BadRequest, Conflict, NotFound
 from coordinator.limits import Limits
 from coordinator.models import get_model
-from coordinator.safety import HALTS, approve_and_place, is_paused
+from coordinator.safety import HALTS, _origin, approve_and_place, is_paused
 from coordinator.broker import NEVER_REACHED
 from fleet2.models import get_module
 from fleet2.models.base import BadTargets, clean_targets
-from fleet2.sim.backtest import COSTS, MIN_TRADE_DOLLARS, Limits as SimLimits, _cap_targets
+from fleet2.sim.backtest import COSTS, Limits as SimLimits, rebalance_trades
 
 log = logging.getLogger(__name__)
 OPEN_ORDER = ("submitting", "submitted", "partially_filled")
@@ -40,6 +47,7 @@ OPEN_ORDER = ("submitting", "submitted", "partially_filled")
 STALE_SUBMITTING_S = 15
 # After Alpaca refused a sale of a stopping model, wait this long before trying again.
 CLOSE_RETRY_S = 300
+NEWS_ONLY = "News strategies are started and stopped from the News screen, never as a paper-trading model"
 
 
 def _sim_limits(limits: Limits) -> SimLimits:
@@ -77,6 +85,11 @@ def start(conn: psycopg.Connection, model_id: str, mode: str, limits: Limits) ->
     """Open a book for the model and set it to Paper trading. The caller creates the
     paper_trade job and stores its id with attach_job()."""
     model = get_model(conn, model_id)
+    if model["market"] == "futures":
+        raise Conflict("Futures models paper trade from the Models screen's Futures view (Start paper trading on "
+                       "Alpaca), never through the stock and crypto books")
+    if model["origin"] == "news":
+        raise Conflict(NEWS_ONLY)
     if model["status"] == "retired":
         raise Conflict("This model is retired")
     if model["metrics"] is None:
@@ -98,6 +111,8 @@ def attach_job(conn: psycopg.Connection, book_id: int, job_id: Any) -> None:
 
 def stop(conn: psycopg.Connection, model_id: str) -> dict[str, Any]:
     """Stop the model's job; its positions are sold by the executor, then the book closes."""
+    if get_model(conn, model_id)["origin"] == "news":
+        raise Conflict(NEWS_ONLY)
     book = open_book(conn, model_id)
     if book is None:
         raise Conflict("This model is not paper trading")
@@ -157,24 +172,21 @@ def receive_signal(conn: psycopg.Connection, worker_id: str, body: dict[str, Any
 def plan_orders(book: dict[str, Any], held: dict[str, float], prices: dict[str, float], weights: dict[str, float],
                 limits: Limits) -> list[dict[str, Any]]:
     """The orders that move the book from what it holds to the model's weights, sized
-    like the backtester: weight x book value, capped per position and per model, and
-    no order under $25 (except selling a position out entirely). Sells come first."""
-    values = {s: q * prices[s] for s, q in held.items() if s in prices}
+    by the backtester's own rebalance_trades: weight x book value, capped per position
+    and per model, no order under $25 (except selling a position out entirely), and a
+    held position resized only when 20% of its target away. Sells come first."""
+    values = {s: q * prices[s] for s, q in held.items() if s in prices and q > 0}
     equity = book["cash"] + sum(values.values())
     tradable = {s: w for s, w in weights.items() if s in prices}
-    wanted = _cap_targets(tradable, equity, _sim_limits(limits))
     orders = []
-    for symbol in sorted(set(held) | set(wanted)):
-        if symbol not in prices:
-            continue
-        have, want = values.get(symbol, 0.0), wanted.get(symbol, 0.0)
-        if want == 0.0 and held.get(symbol, 0.0) > 0:
+    for symbol, delta in sorted(rebalance_trades(values, tradable, equity, _sim_limits(limits)).items()):
+        have = values.get(symbol, 0.0)
+        if delta > 0:
+            orders.append({"symbol": symbol, "side": "buy", "notional": round(delta, 2), "delta": delta})
+        elif delta <= -have:  # sell out entirely
             orders.append({"symbol": symbol, "side": "sell", "qty": held[symbol], "delta": -have})
-        elif want - have >= MIN_TRADE_DOLLARS:
-            orders.append({"symbol": symbol, "side": "buy", "notional": round(want - have, 2), "delta": want - have})
-        elif have - want >= MIN_TRADE_DOLLARS:
-            orders.append({"symbol": symbol, "side": "sell", "qty": held[symbol] * (have - want) / have,
-                           "delta": want - have})
+        else:
+            orders.append({"symbol": symbol, "side": "sell", "qty": held[symbol] * -delta / have, "delta": delta})
     return sorted(orders, key=lambda o: o["delta"])
 
 
@@ -210,9 +222,10 @@ def execute_pass(conn: psycopg.Connection, status: BrokerStatus, limits: Limits)
     books = conn.execute(
         """
         SELECT b.*, m.name AS model_name, m.market FROM books b JOIN models m ON m.id = b.model_id
-         WHERE b.status = 'closing'
-            OR (b.status = 'active' AND b.targets_bar_t IS NOT NULL
-                AND b.targets_bar_t IS DISTINCT FROM b.executed_bar_t)
+         WHERE m.origin <> 'news'  -- coordinator.news_trading trades the news books
+           AND (b.status = 'closing'
+                OR (b.status = 'active' AND b.targets_bar_t IS NOT NULL
+                    AND b.targets_bar_t IS DISTINCT FROM b.executed_bar_t))
          ORDER BY b.id
         """
     ).fetchall()
@@ -264,8 +277,8 @@ def execute_pass(conn: psycopg.Connection, status: BrokerStatus, limits: Limits)
 
 
 def close_if_flat(conn: psycopg.Connection, book_id: int) -> bool:
-    """A closing book with nothing held and nothing in flight becomes closed."""
-    if conn.execute("SELECT 1 FROM positions WHERE book_id = %s AND qty > 0", (book_id,)).fetchone():
+    """A closing book with nothing held (long or short) and nothing in flight becomes closed."""
+    if conn.execute("SELECT 1 FROM positions WHERE book_id = %s AND qty <> 0", (book_id,)).fetchone():
         return False
     if conn.execute("SELECT 1 FROM orders WHERE book_id = %s AND status = ANY(%s)", (book_id, list(OPEN_ORDER))).fetchone():
         return False
@@ -279,34 +292,98 @@ def close_if_flat(conn: psycopg.Connection, book_id: int) -> bool:
 def _book_fill(conn: psycopg.Connection, order: dict[str, Any], new_qty: float, price: float) -> None:
     """Move a newly filled quantity into the model's book (cash and position).
 
-    Buys are bought by dollar amount, so the book is charged exactly the dollars filled.
-    Alpaca takes its crypto fee out of what you receive: fewer coins on a buy, fewer
-    dollars on a sale. Stocks pay no fee (slippage is already in the fill price)."""
+    Buys by dollar amount (notional) charge the book exactly the dollars filled. Alpaca
+    takes its crypto fee out of what you receive: fewer coins on a buy, fewer dollars on
+    a sale. Stocks pay no fee (slippage is already in the fill price).
+
+    Shorts (news stock books only): a sale with nothing held, or while short, makes qty
+    negative and adds the proceeds to cash; a buy while short (buy to cover) moves qty
+    back toward 0 and takes the dollars from cash. `cost` keeps the sign of qty: for a
+    short it is minus the dollars received for the shares still short. So, long or
+    short, cost / qty is the average entry price and qty x price - cost is the open
+    profit, and the book's value is always cash + sum(qty x price). A book whose model
+    is not a news strategy never goes short: a sale filled bigger than what it held is
+    booked only up to what it held (and a warning is logged).
+
+    `price` is the average price of this increment (poll_fills works it out from
+    Alpaca's average over the whole order)."""
     fee = COSTS["crypto"].fee_bps / 10_000.0 if "/" in order["symbol"] else 0.0
+    key = (order["book_id"], order["symbol"])
+    pos = conn.execute("SELECT qty, cost FROM positions WHERE book_id = %s AND symbol = %s FOR UPDATE", key).fetchone()
+    held = float(pos["qty"]) if pos else 0.0
     if order["side"] == "buy":
-        spent = new_qty * price
+        covered = min(new_qty, -held) if held < 0 else 0.0
+        if covered > 0:  # buy to cover: pay for the shares handed back
+            _reduce(conn, key, pos, covered, price)
+            conn.execute("UPDATE books SET cash = cash - %s WHERE id = %s", (covered * price, order["book_id"]))
+        bought = new_qty - covered
+        if bought <= 0:
+            return
+        spent = bought * price
         conn.execute(
             """
             INSERT INTO positions (book_id, symbol, qty, cost) VALUES (%s, %s, %s, %s)
             ON CONFLICT (book_id, symbol) DO UPDATE SET qty = positions.qty + EXCLUDED.qty,
                    cost = positions.cost + EXCLUDED.cost
             """,
-            (order["book_id"], order["symbol"], new_qty * (1.0 - fee), spent),
+            (*key, bought * (1.0 - fee), spent),
         )
         conn.execute("UPDATE books SET cash = cash - %s WHERE id = %s", (spent, order["book_id"]))
         return
-    pos = conn.execute("SELECT qty, cost FROM positions WHERE book_id = %s AND symbol = %s FOR UPDATE",
-                       (order["book_id"], order["symbol"])).fetchone()
-    sold = min(new_qty, pos["qty"]) if pos else 0.0
-    got = sold * price * (1.0 - fee)
-    if pos is not None:
-        left = pos["qty"] - sold
-        if left * price < 0.01:
-            conn.execute("DELETE FROM positions WHERE book_id = %s AND symbol = %s", (order["book_id"], order["symbol"]))
-        else:
-            conn.execute("UPDATE positions SET qty = %s, cost = cost * %s WHERE book_id = %s AND symbol = %s",
-                         (left, left / pos["qty"], order["book_id"], order["symbol"]))
+    sold = min(new_qty, held) if held > 0 else 0.0
+    if sold > 0:  # sell what is held
+        _reduce(conn, key, pos, sold, price)
+        conn.execute("UPDATE books SET cash = cash + %s WHERE id = %s", (sold * price * (1.0 - fee), order["book_id"]))
+    shorted = new_qty - sold
+    # safety.limit_problem never lets a sale cross from long to short, so after a long is
+    # sold out anything left over is rounding, not a short.
+    if shorted <= 0 or (held > 0 and shorted * price < 0.01):
+        return
+    if _origin(conn, order["model_id"]) != "news":
+        # Only news books may be short. A bigger fill than was held (say, a sale planned
+        # again after a lost answer from Alpaca) is booked only up to what was held.
+        log.warning("order %s of %s filled %.6g %s but the book held %.6g: the extra %.6g is not booked as a short "
+                    "(only news strategies short); check the Alpaca account", order["id"], order["model_id"],
+                    new_qty, order["symbol"], max(held, 0.0), shorted)
+        return
+    got = shorted * price * (1.0 - fee)
+    conn.execute(
+        """
+        INSERT INTO positions (book_id, symbol, qty, cost) VALUES (%s, %s, %s, %s)
+        ON CONFLICT (book_id, symbol) DO UPDATE SET qty = positions.qty + EXCLUDED.qty,
+               cost = positions.cost + EXCLUDED.cost
+        """,
+        (*key, -shorted, -got),
+    )
     conn.execute("UPDATE books SET cash = cash + %s WHERE id = %s", (got, order["book_id"]))
+
+
+def _increment_price(order: dict[str, Any], filled_qty: float, avg: float, new_qty: float) -> float:
+    """The average price of the part of a fill not booked yet. Alpaca's filled_avg_price
+    is over the whole order, so the increment is (filled_qty x avg - dollars already
+    booked) / new_qty. What was booked is booked_qty x the filled_avg_price stored with
+    it: poll_fills stores the order's average each time it books, and never clears it."""
+    booked_qty = float(order["booked_qty"] or 0.0)
+    if booked_qty <= 0 or not order["filled_avg_price"]:
+        return avg
+    price = (filled_qty * avg - booked_qty * float(order["filled_avg_price"])) / new_qty
+    if not math.isfinite(price) or price <= 0:
+        log.warning("order %s: increment price %.6g makes no sense; booking at the average %.6g",
+                    order["id"], price, avg)
+        return avg
+    return price
+
+
+def _reduce(conn: psycopg.Connection, key: tuple[int, str], pos: dict[str, Any], amount: float, price: float) -> None:
+    """Take `amount` (> 0) off a long or a short position, keeping cost in proportion;
+    a position worth under a cent afterwards is removed."""
+    held = float(pos["qty"])
+    left = held - amount if held > 0 else held + amount
+    if abs(left) * price < 0.01:
+        conn.execute("DELETE FROM positions WHERE book_id = %s AND symbol = %s", key)
+    else:
+        conn.execute("UPDATE positions SET qty = %s, cost = cost * %s WHERE book_id = %s AND symbol = %s",
+                     (left, left / held, *key))
 
 
 def poll_fills(conn: psycopg.Connection, status: BrokerStatus, book_id: int | None = None) -> int:
@@ -335,12 +412,13 @@ def poll_fills(conn: psycopg.Connection, status: BrokerStatus, book_id: int | No
         new_qty = max(0.0, state.filled_qty - order["booked_qty"])
         booked = 0.0
         if new_qty > 0 and state.filled_avg_price:
-            _book_fill(conn, order, new_qty, state.filled_avg_price)
+            _book_fill(conn, order, new_qty, _increment_price(order, state.filled_qty, state.filled_avg_price, new_qty))
             booked = new_qty
         done = state.status in ("filled", "cancelled", "rejected")
         conn.execute(
             """
-            UPDATE orders SET status = %s, filled_qty = %s, filled_avg_price = %s, booked_qty = booked_qty + %s,
+            UPDATE orders SET status = %s, filled_qty = %s, filled_avg_price = COALESCE(%s, filled_avg_price),
+                   booked_qty = booked_qty + %s,
                    error = CASE WHEN %s IN ('filled', 'partially_filled') THEN NULL ELSE COALESCE(%s, error) END,
                    finished_at = CASE WHEN %s THEN now() ELSE finished_at END
              WHERE id = %s

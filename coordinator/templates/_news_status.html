@@ -1,0 +1,12 @@
+{% if not enabled %}<p class="fnote" data-news-off>The news analyst is switched off (enabled = false in config/ai.toml [news]). New articles are still saved, but Claude does not read them.</p>{% endif %}
+{% if demo %}<p class="muted small" data-news-demo>Demo data: made-up prices and a pretend Alpaca account.</p>{% endif %}
+<div class="mcards six" data-news-status>
+{% for c in status %}
+  <article class="mcard" data-status-card="{{ c.key }}" data-tone="{{ c.tone }}">
+    <h3 class="mlabel" data-label>{{ c.label }}</h3>
+    <p class="mvalue num" data-value>{{ c.value }}</p>
+    <p class="mdescr" data-description>{{ c.description }}</p>
+    {% if c.note %}<p class="mnote" data-note>{{ c.note }}</p>{% endif %}
+  </article>
+{% endfor %}
+</div>

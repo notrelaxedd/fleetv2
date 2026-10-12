@@ -1,0 +1,83 @@
+# fleet-v2 AI settings: Claude Haiku writing recipes for futures model search, reviewing
+# futures models and writing a daily market note (docs/AI_PLAN.md), and Claude Opus
+# reading the market news for the news strategies (docs/NEWS_PLAN.md). Edit on box1, then
+# `docker compose restart coordinator`.
+#
+# The key goes in .env on box1 (ANTHROPIC_API_KEY=...), read only by the coordinator.
+# Without a key nothing here runs and nothing is spent.
+
+[spend]
+# The most all AI features together may spend in a calendar month (UTC), in US dollars.
+# Before every call the coordinator adds the most that call could cost to what this
+# month has cost so far, and does not make it if that would go over. Your own cap.
+monthly_cap_usd = 5.0
+
+[recipes]
+# Claude Haiku writes recipes while a futures model search runs; the search takes them
+# at the start of a round, beside its random recipes (so the two can be compared).
+enabled = true
+model = "claude-haiku-5-5"
+# Recipes asked for in one call, and the most untried Haiku recipes kept waiting.
+per_call = 4
+queue = 8
+# At most this many calls an hour.
+calls_per_hour = 6
+# Haiku recipes a search round takes (on top of its random ones).
+per_round = 3
+# How hard Haiku thinks before answering: "low", "medium" or "high". More thinking
+# costs more (it is billed as output).
+effort = "low"
+# The longest answer, thinking included, in tokens. Also what the cap check counts.
+max_tokens = 8000
+
+[reviews]
+# Claude Haiku reviews futures models: what could be luck, what looks fragile, what to
+# watch on paper. Advice only; it changes nothing.
+enabled = true
+# Automatic reviews of models that beat their coin flip, have a Final check or trade,
+# whenever their results change (a new backtest, a Final check, five more paper days).
+# With false, only the "Ask Claude Haiku for a review" button on a model's page.
+auto = true
+# At most this many reviews a day, automatic and asked-for together.
+per_day = 20
+effort = "low"
+max_tokens = 6000
+
+[market_note]
+# Before each session, Claude Haiku reads the headlines since the last close (Alpaca's
+# news feed, with the Alpaca paper keys) and writes a short note: the day's scheduled
+# events, how heavy the news is, and a flag for an unusual day. An experiment, tested
+# only going forward: see docs/AI_PLAN.md. Nothing trades on it.
+enabled = true
+# When to write it, Chicago time (the session opens at 08:30).
+time = "07:45"
+# At most this many headlines read.
+headlines = 60
+effort = "low"
+max_tokens = 4000
+
+[news]
+# Claude Opus reads each new article that names a stock or coin we trade and predicts
+# the move. Predictions are scored; the news strategies trade them only once the scores
+# beat a coin flip (config/limits.toml [news]). See docs/NEWS_PLAN.md.
+enabled = true
+model = "claude-opus-5-5"
+effort = "medium"
+max_tokens = 16000
+# The most the news engine may spend in a UTC day, in US dollars. It also counts
+# against monthly_cap_usd above: with the news engine on, raise that cap to fit
+# (about 31 days x this amount, plus the Haiku features).
+daily_cap_usd = 5.0
+# News older than this when it arrives is not analysed (hours).
+max_article_age_hours = 6
+# US dollars per million tokens for the model above (claude-opus-5-5: $4 in, $20 out;
+# cache reads are charged at the input price here, which overcounts a little).
+input_per_million = 4.00
+output_per_million = 20.00
+
+[prices]
+# US dollars per million tokens for claude-haiku-5-5, for prompts up to 100,000 tokens
+# (these are far shorter). Source: Anthropic's price list, October 2026. Check at
+# claude.com/pricing.
+input_per_million = 0.10
+output_per_million = 0.50

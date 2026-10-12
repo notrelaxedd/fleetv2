@@ -25,6 +25,7 @@ JOB_LABELS = {
     "backtest": "Backtest",
     "paper_trade": "Paper trade",
     "model_search": "Model search",
+    "final_check": "Final check",
 }
 JOB_CHOICES = (
     ("backtest", "Backtest", "Test one model on past prices and save its results."),
@@ -314,7 +315,8 @@ def fleet_page(conn: psycopg.Connection, status: BrokerStatus, limits: Limits, n
         "tiles": tiles(conn, status, limits, cards),
         "workers": cards,
         "assign": assign_options(conn, cards, [
-            {"id": m["id"], "name": m["name"], "market": m["market"]} for m in list_models(conn)]),
+            {"id": m["id"], "name": m["name"], "market": m["market"]} for m in list_models(conn)
+            if m["market"] != "futures"]),
         "previous_jobs": previous_jobs(conn, now),
         "server_time": now.isoformat(),
     }
