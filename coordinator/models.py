@@ -3,6 +3,10 @@ stored as workers report them, and the job details a backtest needs.
 
 A model row points at its model file (`module`) plus its own parameters, so a model
 found by search later is a row, not new code.
+
+The news strategies (origin 'news', module 'news', coordinator.news_trading) are model
+rows only so their books and orders can point at them: there is no model file 'news',
+so they are never listed with the models, backtested, searched or paper traded as one.
 """
 from __future__ import annotations
 
@@ -42,12 +46,14 @@ def sync_starters(conn: psycopg.Connection) -> int:
     return len(REGISTRY)
 
 
-def list_models(conn: psycopg.Connection, include_retired: bool = False) -> list[dict[str, Any]]:
-    """Every model, starters first then by name."""
+def list_models(conn: psycopg.Connection, include_retired: bool = False,
+                include_news: bool = False) -> list[dict[str, Any]]:
+    """Every model, starters first then by name. The news strategies are left out unless
+    asked for: they have their own screen, and no backtest, search or paper-trade job."""
     rows = conn.execute(
-        "SELECT * FROM models WHERE %s OR status IS DISTINCT FROM 'retired'"
+        "SELECT * FROM models WHERE (%s OR status IS DISTINCT FROM 'retired') AND (%s OR origin <> 'news')"
         " ORDER BY (origin = 'starter') DESC, name",
-        (include_retired,),
+        (include_retired, include_news),
     ).fetchall()
     return rows
 
@@ -92,6 +98,8 @@ def job_params(conn: psycopg.Connection, kind: str, model_id: str | None, params
         if not model_id:
             raise BadRequest("Pick a model for this job")
         model = get_model(conn, model_id)
+        if model["origin"] == "news":
+            raise BadRequest("News strategies are not backtested: their saved predictions are scored instead")
         if model["market"] == "futures":
             from coordinator import futures_models
 

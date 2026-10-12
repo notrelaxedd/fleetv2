@@ -10,10 +10,11 @@ from coordinator.leases import lease_seconds
 from coordinator.api.app import create_app
 from coordinator.config import Config
 from coordinator.loop import LoopThread
-from coordinator.tasks import make_ai_tasks, make_futures_tasks, make_tasks
+from coordinator.tasks import make_ai_tasks, make_futures_tasks, make_news_tasks, make_tasks
 from coordinator import trading
 
 log = logging.getLogger("coordinator.main")
+NEWS_LOOP_SECONDS = 10.0
 
 
 def main() -> None:
@@ -40,12 +41,22 @@ def main() -> None:
         venues, app.state.topstep, app.state.limits) + make_ai_tasks(app.state.ai, config.anthropic_api_key, app.state.topstep, app.state.news)
     loop = LoopThread(loop_pool, config.loop_seconds, extra=extra)
     loop.start()
+    # The news engine's own thread: the news feed and Claude are slow calls.
+    news_pool = db.make_pool(config.database_url, min_size=1, max_size=2)
+    news_loop = LoopThread(news_pool, NEWS_LOOP_SECONDS, core=False, name="fleet2-news",
+                           extra=make_news_tasks(app.state.news_feed, app.state.analyst, app.state.ai,
+                                                 app.state.bar_source))
+    news_loop.start()
+    log.info("news feed: %s; news analyst: %s", app.state.news_feed.problem or "connected",
+             app.state.analyst.problem or app.state.analyst.model)
     log.info("serving on %s (public url %s, dev=%s)", config.bind, config.public_url, config.dev)
     try:
         uvicorn.run(app, host=config.bind_host, port=config.bind_port, log_level="warning")
     finally:
         loop.stop()
+        news_loop.stop()
         loop_pool.close()
+        news_pool.close()
 
 
 def _live_share_price(pool, symbol: str) -> float | None:

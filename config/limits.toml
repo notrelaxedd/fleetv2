@@ -9,12 +9,36 @@
 starting_balance_per_model = 10000
 # Most a model may hold in one position (dollars).
 max_per_position = 1000
-# Most a model may have invested in total (dollars).
+# Most a model may have invested in total (dollars). For a news strategy this counts
+# longs and shorts together (gross exposure).
 max_per_model = 10000
+# Shorts (news strategies only): most per short position, and in total per strategy.
+max_per_short_position = 500
+max_short_per_model = 5000
 
 [safety]
 # Pause all trading when the account is down more than this percent on the day.
 daily_loss_limit_pct = 2.0
+
+[news]
+# When the news strategies trade Claude's predictions (docs/NEWS_PLAN.md). Claude's
+# model, effort and spending are in config/ai.toml.
+# Most new positions each news strategy may open per day.
+max_trades_per_day = 10
+# Only trade predictions Claude is at least this confident in (0 to 1).
+min_confidence = 0.6
+# Only trade predicted moves at least this many times the round-trip cost.
+cost_multiple = 2.0
+# A news strategy can start paper trading only after this many scored predictions
+# that beat the coin-flip twin.
+min_scored_predictions = 100
+# Close a news position when it moves this many percent against it.
+stop_loss_pct = 5.0
+# Borrow fee assumed for shorts in scoring (percent a year) until checked with Alpaca.
+short_borrow_fee_pct = 3.0
+# Replays only use news from this day on: after Claude's training cutoff (June 2026
+# for Claude Opus 5.5) plus a margin, so it cannot already know the outcome.
+no_replay_before = 2026-08-01
 
 [fleet]
 # A worker card turns amber at this CPU temperature (degrees C).

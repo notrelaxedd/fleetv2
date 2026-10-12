@@ -38,7 +38,11 @@ log = logging.getLogger(__name__)
 
 FEATURE = "recipes"
 # The training numbers kept per recipe, and so the only numbers Haiku ever sees.
-TRAIN_KEYS = ("tried", "best_score", "passes", "days_traded", "pnl_double", "pnl_normal")
+# Combines started on the training days (fleet2.worker.futures_jobs.training_combine), the
+# best setting's: its score, measured as "net_per_attempt" (dollars) or "passes_per_month"
+# (while a fee or the payout cap is unset), best contract size, pass and timeout rates.
+COMBINE_KEYS = ("combine_score", "combine_measure", "best_size", "pass_rate", "timeout_rate")
+TRAIN_KEYS = ("tried", "best_score", "passes", "days_traded", "pnl_double", "pnl_normal", *COMBINE_KEYS)
 HISTORY_BEST, HISTORY_RECENT = 25, 15
 
 
@@ -105,6 +109,9 @@ SYSTEM = (
     "built only from fixed building blocks. A program tunes each idea's numbers on the training years and keeps "
     "it only if it makes money there at double the normal costs, trades on at least 100 days, and its worst "
     "quarter of the training years is still good (the score is the worst of four parts' daily Sharpe ratio). "
+    "Among those, it picks the settings whose training days would have done best in Combines started on every "
+    "training day: the expected dollars per Combine attempt (negative: the monthly fees an attempt pays when it "
+    "never passes), at the best number of contracts. "
     "The end goal is a Topstep 50K Combine: reach $3,000 profit before losing $2,000 from the best end-of-day "
     "balance, within about 60 trading days, with every position closed each day by 15:00 Chicago time. "
     "Prefer ideas with a plain market reason behind them (a known intraday habit of index futures), and ideas "
@@ -126,6 +133,20 @@ def _result_text(res: dict[str, Any]) -> str:
         parts.append(f"{int(res['days_traded'])} days traded")
     if res.get("pnl_double") is not None:
         parts.append(f"${float(res['pnl_double']):,.0f} at double costs")
+    if res.get("combine_score") is not None:
+        size = res.get("best_size")
+        if res.get("combine_measure") == "passes_per_month":
+            line = f"training Combines: {float(res['combine_score']):.2f} passed per month of fees"
+        else:
+            net = float(res["combine_score"])
+            line = f"training Combines: {'-' if net < 0 else ''}${abs(net):,.0f} per attempt"
+        if size is not None:
+            line += f" at {int(size)} contract{'s' if int(size) != 1 else ''}"
+        if res.get("pass_rate") is not None:
+            line += f", {float(res['pass_rate']) * 100:.0f}% passed"
+        if res.get("timeout_rate") is not None:
+            line += f", {float(res['timeout_rate']) * 100:.0f}% ran out of time"
+        parts.append(line)
     return ", ".join(parts)
 
 
@@ -255,18 +276,27 @@ def _training_only(entry: dict[str, Any]) -> dict[str, Any]:
     out = {k: entry.get(k) for k in TRAIN_KEYS}
     out["tried"] = int(out["tried"] or 0)
     out["passes"] = bool(out["passes"])
-    for k in ("best_score", "pnl_double", "pnl_normal"):
+    for k in ("best_score", "pnl_double", "pnl_normal", "combine_score", "pass_rate", "timeout_rate"):
         out[k] = None if out[k] is None else float(out[k])
-    out["days_traded"] = None if out["days_traded"] is None else int(out["days_traded"])
+    for k in ("days_traded", "best_size"):
+        out[k] = None if out[k] is None else int(out[k])
+    out["combine_measure"] = None if out["combine_measure"] is None else str(out["combine_measure"])[:32]
     return out
 
 
 def _merge(old: dict[str, Any] | None, new: dict[str, Any]) -> dict[str, Any]:
-    """The better of two results (by best score), with the tries added up."""
+    """The better of two results (by best score), with the tries added up, and the
+    training Combine numbers of whichever has the higher combine_score."""
     if not old:
         return new
     better = new if (new.get("best_score") or float("-inf")) > (old.get("best_score") or float("-inf")) else old
-    return {**better, "tried": int(old.get("tried") or 0) + int(new.get("tried") or 0)}
+    combine = new if _higher(new.get("combine_score"), old.get("combine_score")) else old
+    return {**better, **{k: combine.get(k) for k in COMBINE_KEYS},
+            "tried": int(old.get("tried") or 0) + int(new.get("tried") or 0)}
+
+
+def _higher(a: Any, b: Any) -> bool:
+    return a is not None and (b is None or float(a) > float(b))
 
 
 def record_results(conn: psycopg.Connection, job_id: str | None, recipes: list[dict[str, Any]]) -> int:

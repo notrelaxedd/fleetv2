@@ -1,0 +1,52 @@
+{% if not paper.available %}
+<p class="empty" data-paper-missing>Paper trading for news is not built into this version yet.</p>
+{% else %}
+<p class="muted small nintro">Each market has its own pretend book. A book can only start once its predictions have beaten the coin-flip twin, and every order still goes through the usual safety checks. Stopping sells everything the book holds.</p>
+<div class="npapers">
+{% for b in paper.books %}
+<article class="card nblock" data-book="{{ b.market }}" data-status="{{ b.status }}">
+  <h3 class="ntitle">{{ b.name }} <span class="tag" data-book-status>{{ b.status_text }}</span></h3>
+  <p class="muted small" data-market-note>{{ b.note }}</p>
+  {% if b.status == "not_started" %}<p class="muted" data-not-started>This book has not started, so it holds no cash and no positions.</p>{% else %}
+  <div class="mcards six">
+  {% for c in b.cards %}
+    <article class="mcard compact" data-book-metric="{{ c.key }}">
+      <h4 class="mlabel" data-label>{{ c.label }}</h4>
+      <p class="mvalue num" data-value>{{ c.value }}</p>
+      <p class="mdescr" data-description>{{ c.description }}</p>
+    </article>
+  {% endfor %}
+  </div>
+  {% endif %}
+  {% if b.waiting %}<p class="muted small" data-waiting>{{ b.waiting }}</p>{% endif %}
+  <div class="mactions">
+    <button type="button" class="btn solid" data-action="news-start" data-market="{{ b.market }}"{% if b.start_disabled %} disabled{% endif %}>Start paper trading</button>
+    <button type="button" class="btn" data-action="news-stop" data-market="{{ b.market }}"{% if b.stop_disabled %} disabled{% endif %}>Stop paper trading</button>
+  </div>
+  {% if b.start_reason %}<p class="muted small" data-start-reason>Cannot start yet: {{ b.start_reason }}</p>{% endif %}
+</article>
+{% endfor %}
+</div>
+<h3 class="section npos-title">Open positions</h3>
+{% if paper.positions %}
+<div class="table-wrap">
+  <table class="jobs ntable" data-positions>
+    <thead><tr><th>Market</th><th>Symbol</th><th>Bet</th><th>Size</th><th>Bought at</th><th>Now</th><th>Worth now</th><th>Gain or loss</th><th>Stop at</th><th>Planned exit</th><th>Why</th></tr></thead>
+    <tbody>
+    {% for p in paper.positions %}
+      <tr data-position="{{ p.symbol }}">
+        <td>{{ p.market }}</td><td class="num">{{ p.symbol }}</td>
+        <td>{{ p.side }}{% if p.side == "Short" %} (profits if it falls){% endif %}</td>
+        <td class="num">{{ p.qty }}</td><td class="num">{{ p.entry }}</td><td class="num">{{ p.now }}</td>
+        <td class="num">{{ p.value }}</td><td class="num npnl" data-tone="{{ p.tone }}">{{ p.change }}</td>
+        <td class="num">{{ p.stop }}</td><td>{{ p.due }}</td><td class="nwhy">{{ p.headline }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+<p class="muted small">"Stop at" is the price at which the coordinator closes the position to limit a loss. "Planned exit" is when it is closed even without that.</p>
+{% else %}
+<p class="empty" data-no-positions>No open positions.</p>
+{% endif %}
+{% endif %}

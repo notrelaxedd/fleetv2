@@ -121,8 +121,8 @@ run at once (`Conflicts=` in the service file).
 
 ## Using it
 
-The dashboard has two screens, **Fleet** and **Models** (with a Futures view, see
-"Futures on the Models screen"). The header shows the trading
+The dashboard has three screens, **Fleet**, **Models** (with a Futures view, see
+"Futures on the Models screen") and **News** (see "News engine"). The header shows the trading
 mode, whether stocks and crypto are open, and the Pause all trading button.
 
 ![Models screen](docs/screenshots/stage5-models-desktop.png)
@@ -142,8 +142,9 @@ with the lowest CPU), to one worker, or to every idle worker:
 First run, in order:
 
 1. Assign a **Data refresh** and wait for it to finish. Backtests need the prices.
-2. **Run backtest** for each of the four starter models (Momentum, Dip buyer, Crypto
-   trend, Pairs), from the Models screen or Assign a job.
+2. **Run backtest** for each of the seven starter models (Momentum, Dip buyer, Crypto
+   trend, Pairs, Weekly losers, Near yearly high, Calm stocks), from the Models screen or
+   Assign a job.
 3. Open **Models** to compare them.
 
 ![Fleet screen](docs/screenshots/stage5-fleet-desktop.png)
@@ -151,9 +152,9 @@ First run, in order:
 **Models** lists every model ranked by ROI on the held-out period (the last part of the
 prices, see "Honest backtesting"). A model with under 100 trades says "Not enough
 trades" and is never ranked first. Pick a model to see its Growth of $100 chart against
-buying and holding SPY (or BTC for crypto), and eight numbers: ROI, vs. buy and hold,
-max drawdown, Sharpe ratio, win rate, profit factor, trades and average hold. Each has a
-plain-words explanation under it.
+buying and holding SPY (or BTC for crypto), and twelve numbers: ROI, vs. buy and hold,
+max drawdown, Sharpe ratio, win rate, profit factor, trades, average hold, luck test,
+years tested, beta and alpha. Each has a plain-words explanation under it.
 
 **Start paper trading** (on a tested model) gives the model its own virtual book of
 $10,000 and a worker to run it. The worker sends the model's decisions to the
@@ -161,11 +162,45 @@ coordinator, which places the orders in the Alpaca paper account. **Stop paper t
 sells the model's positions and closes its book. While models paper trade, the
 coordinator keeps their prices fresh by itself.
 
-**Start model search** tries new settings for the model files. It draws seeded random
-settings, tests each on the training period only, keeps the best, and then measures it
-once on the held-out period it never saw. It repeats until you press Stop model search,
-and keeps at most five found models per model file (the one with the lowest training
-score is dropped when a better one is found).
+Trading costs are kept low on purpose. A held position is only resized when its target
+has moved by at least 20% (and at least $25), so small price moves do not pay fees.
+Opening and closing trades are not affected, and backtests follow the same rule. Crypto
+trend decides at most once a day, since a crypto round trip (buy and sell) costs about
+0.7%.
+
+**Start model search** tries new settings for the model files. It tests each one on the
+training period only, keeps the best, and then measures it once on the held-out period it
+never saw. It repeats until you press Stop model search. It keeps at most five found
+models per model file. A find that passes the checks below beats one that does not;
+otherwise the higher training score wins.
+
+It also keeps a **search log** on box1 with every setting it tries, how it did on
+training and why it was thrown away. The log does three things:
+
+- **Learns.** After about 20 scored settings for a model file, most new settings lean
+  toward the ones that scored well and away from the ones that failed. About 30% stay
+  random, so it keeps looking in new places. The log survives restarts.
+- **Checks.** Each round's best find is tested again on training prices only. The score
+  is its yearly return minus buy and hold's, so extra trades alone earn nothing. The
+  training period is split into four parts and the worst part counts. Each setting is
+  also nudged 10% either way, tested at double trading costs and compared with random
+  coin-flip trades. A model that fails a check is still shown on the Models screen, with
+  a tag ("Inconsistent", "Fragile settings", "Breaks at higher costs" or "No better than
+  random"), but it is not ranked.
+- **Gives up.** A model file that reaches 2,000 tries with nothing positive gives up. It
+  gets no more worker time, and the status line says "N model files gave up". When every
+  model file gives up, the search stops and says that new model ideas are needed. To let
+  them try again, reset the log on box1:
+
+  ```bash
+  docker compose exec coordinator python -m coordinator.cli reset-search-log
+  ```
+
+  Add `--market stocks` or `--market crypto` to clear one market, or `--family NAME` for
+  one model file.
+
+None of this guarantees a model that makes money. It stops the search wasting time and
+rewarding luck. "Gave up" means that file needs new ideas, not more time.
 
 ## Futures models
 
@@ -300,22 +335,37 @@ stand-in, "synthetic" in demo mode), with two buttons:
 
 How futures model search works:
 
-- **Score**: training is cut into four back-to-back parts. In each part the model's
-  daily profit and loss at one contract and **double slippage** gives a Sharpe ratio
-  (return against how bumpy it was). The score is the worst of the four, so a setting
-  that only worked in one stretch scores low.
+- **Winners**: a setting wins a round by what it would have done in Topstep Combines on
+  **training** prices, not only by how steady its daily profit was. The Combine simulator
+  runs the training days at every contract size and sees each attempt pass, fail or run
+  out of time. The score is the expected dollars per attempt at the best size. A setting
+  that never passes scores the floor (every monthly fee of an attempt plus the activation
+  fee), below anything that passes even once, so it cannot win. On the held-out results
+  such a model shows about -$147: it pays the monthly fee (about $49) for about three
+  months until time runs out. The Futures view says so ("Never reaches the target: it
+  pays the monthly fee until time runs out."). Steadiness (a Sharpe ratio
+  per training part, at double slippage, the worst part counting) only breaks ties.
+  Held-out prices still never choose a setting, and the lockbox stays untouched until
+  Final check.
 - **Gates**: it must trade on at least 100 different training days and make money at
   normal and at double slippage.
-- **Proposals**: half of each round's settings are random, half are small changes to
-  the models already kept. Every setting can be made again from its seed text, which
+- **Proposals**: half of each round's settings come from the search log (see "Start
+  model search"), half are small changes to the models already kept. Recipes are still
+  tried with random settings. Every setting can be made again from its seed text, which
   names the parent model for a change.
 - **Robustness**: the best setting of a round is tried again with each number moved 10%
-  down and 10% up. If the middle one of those scores under half as well, the winner sat
-  on a lucky peak and is dropped.
+  down and 10% up. If the middle one of those keeps less than half of the winner's gain
+  above the fee floor, the winner sat on a lucky peak and is dropped.
 - **Keeping**: at most five found models per model file. A new find replaces the kept
   model with the most similar settings when it scores higher. A find whose daily
   results move more than 90% like a kept model's is the same idea twice: it only
   replaces that model if it scores higher.
+- **Giving up**: a model file or recipe gives up after 2,000 tries with nothing positive.
+  Once the fees and payout cap are set, it also gives up after 5 of its finds have been
+  held-out tested and none beat the fee floor or its coin-flip twin. A family that gave
+  up gets no more worker time, and the status line says "N model files gave up". If every
+  futures model file gives up, the search keeps going on recipes. Reset the log as shown
+  under "Start model search" (add `--market futures` to clear only the futures log).
 - **Chance this is luck**: every setting tried is counted. The more tries, the more one
   of them looks good by luck alone; this figure (the deflated Sharpe ratio) says how
   likely that is for each model. Lower is better.
@@ -505,9 +555,13 @@ What the simulator reports for a model, at each contract size it tries:
 ## Safety controls
 
 - **Pause all trading**: one button in the header. While paused no model places an
-  order. Backtests and model searches keep running. Resume trading is the same button.
+  order (except the news strategies' protective closes, below). Backtests and model searches keep running. Resume trading is the same button.
 - **Daily loss limit**: if the Alpaca account is down more than 2% on the day, all
-  trading pauses by itself and says why. Only you resume it.
+  trading pauses by itself and says why. Only you resume it. An order that only
+  reduces a position (a sale of at most the shares held, or buying back at most the
+  shares short) skips the loss check, since it can only lower risk. While paused, the
+  news strategies still close a position through its stop and close every position of
+  a strategy you stopped; nothing else goes out until you resume.
 - **Per-model limits** in `config/limits.toml`: starting balance 10,000, max per position
   1,000, max per model 10,000 (dollars). A worker cannot raise them. Edit the file, then
   `docker compose restart coordinator`. The daily loss percent and the temperature at
@@ -536,8 +590,19 @@ What the simulator reports for a model, at each contract size it tries:
   never sees it, and models are ranked on it only.
 - **Benchmark.** Buy and hold SPY for stock models, BTC for crypto models, over the same
   period.
+- **Luck test** (stock and crypto models). The held-out t-statistic is the Sharpe ratio times the square root of
+  the years tested. Under 1.96 the model is tagged "Could be luck". It is a label, not a
+  rank change. The held-out period is short (about 2.7 years for stocks, 1.4 for
+  crypto), so a stock model needs a Sharpe above about 1.2 to pass, and a crypto model
+  above about 1.6. Model search tries many settings, so some pass by chance.
+- **Beta and alpha.** Beta is how much the model moves with SPY (or BTC). Alpha is the
+  return per year left after taking that out. A model with a high beta and no alpha is
+  mostly the market.
 - **Same limits as paper trading.** Backtests use the same balance and the same
   per-position and per-model caps.
+
+Results saved before the luck test existed show "Backtest again to see this" on the
+four new cards until the model is backtested again.
 
 Futures models have their own backtester (`fleet2/sim/futures_backtest.py`) with the
 same promise, adapted to day trading:
@@ -556,6 +621,15 @@ same promise, adapted to day trading:
   (Topstep's own deadline is 15:10). Half days close at 12:00.
 - **Results by day:** profit or loss, the worst moment of the day including open trades
   (that is what Topstep's loss limit watches), trades and minutes held.
+
+## Where the newer starter models come from
+
+Weekly losers (short-term reversal), Near yearly high (52-week high) and Calm stocks
+(low volatility) are published effects listed in
+[awesome-systematic-trading](https://github.com/paperswithbacktest/awesome-systematic-trading).
+They are re-written for the fleet: buy-only, price data only, and the same 20 stocks
+as the other stock models. The papers' versions also sell short and use far bigger
+universes. No code was copied (that repo has no license).
 
 ## When a worker goes offline
 
@@ -576,6 +650,93 @@ Demo mode: `FLEET_FAKE_BROKER=1` uses made-up prices and a fake Alpaca account, 
 whole thing can be tried with no keys. The dashboard labels it "demo data" on screen.
 Never use it with real keys. For a local run also set `FLEET_DEV=1` (no Tailscale login
 needed) and `DATABASE_URL` to a Postgres database, then `python -m coordinator.main`.
+
+## News engine
+
+Claude Opus reads the market news and predicts how each stock or coin it names will move.
+Every prediction is saved and later checked against what the price really did, beside a
+coin-flip twin. Two news strategies (stocks, crypto) trade those predictions on Alpaca
+paper, but only once they have proved themselves. The plan and its reasons are in
+`docs/NEWS_PLAN.md`; it is the owner's exception to "No AI ever trades" in `docs/AI_PLAN.md`.
+
+![News screen](docs/screenshots/news-desktop.png)
+
+**Setup.** It uses the same `ANTHROPIC_API_KEY` in `.env` on box1 as the Haiku features,
+and the Alpaca paper keys for the news feed. Its settings are in `config/ai.toml` [news]:
+the model (`claude-opus-5-5`), effort, and `daily_cap_usd` (5 dollars a day). It also
+counts against `monthly_cap_usd`, the one cap for all Claude features, which is 5 dollars
+by default: **raise it** (about 155 for 5 dollars a day plus the Haiku features), or the
+news engine stops once the month's cap is used. Then `docker compose restart coordinator`.
+
+**How it works.**
+
+1. Every minute the coordinator fetches new articles from Alpaca's news feed that name
+   one of the 30 stocks and coins we trade (`coordinator/news_feed.py`).
+2. Claude reads each one (articles over 6 hours old are skipped) and, per symbol, gives a
+   direction (up, down or none), the size of the move, how many trading days it should
+   take (1 to 10), its confidence, and whether the news is already in the price
+   (`coordinator/research.py`). The article is treated as untrusted text: Claude has no
+   tools, its answer must fit a fixed shape, and anything else is dropped. About 4 cents
+   an article.
+3. Once the horizon has passed, each prediction is scored: bought (or sold short) at the
+   open of the first bar after the decision, sold at the close of the last day, after
+   costs, beside SPY or BTC and beside a coin-flip twin with the same bars
+   (`coordinator/news_scoring.py`).
+4. A strategy can start paper trading only when its scored predictions (the ones
+   confident enough to trade) beat the coin-flip twin by more than twice the luck
+   margin, over at least 100 of them, and make money after costs. The **News** screen
+   says how far each one is from that.
+
+**News screen.** The status of the feed and of Claude, today's and this month's spend
+against the caps, the scores per market with the coin-flip comparison, the paper books
+with **Start paper trading** (greyed out with the reason until the scores allow it) and
+**Stop paper trading**, and the latest articles with Claude's call on each symbol and its
+score once known.
+
+**What the news strategies trade** (limits in `config/limits.toml`, [money] and [news]):
+
+- A prediction is traded only if it is at most 30 minutes old, its confidence is at
+  least `min_confidence` (0.6), it is not already priced in, and the move is at least
+  `cost_multiple` (2) times the round-trip cost. At most `max_trades_per_day` (10) new
+  positions per strategy a day, one per symbol.
+- Up: buy, up to `max_per_position` (1,000 dollars). Down: for stocks, a **short sale** of
+  whole shares, up to `max_per_short_position` (500 dollars) and `max_short_per_model`
+  (5,000) in total; for crypto (Alpaca cannot short it) only the sale of a coin it holds.
+  Longs and shorts together stay within `max_per_model`.
+- Each position has a stop `stop_loss_pct` (5%) from its entry, watched against Alpaca's
+  latest price on every loop pass, and is closed when its horizon ends or a newer
+  prediction says the opposite. The stops are watched by box1: while it is off, they
+  are not.
+- All books share one Alpaca account, so: a stock is only shorted if Alpaca says it is
+  shortable and easy to borrow, no book shorts what another holds or is buying, no book
+  buys what another is short, no sale turns a long into a short, and the news strategies
+  never trade SPY or QQQ (the futures paper books use them). Pause all trading and the
+  daily loss limit stop them like everything else.
+
+### News replay
+
+Claude remembers how most past news turned out, so a test on old news would look
+brilliant and prove nothing. The replay only uses news published after Claude's training
+cutoff plus a margin (`no_replay_before` in `config/limits.toml`, 2026-08-01). It shows
+Claude each such article as if it were live, five minutes after publication, with only
+the prices known by then, saves the predictions as "replay" and scores them like live
+ones (`coordinator/news_replay.py`). An article edited after that decision time is
+skipped and counted as skipped, because Alpaca gives only an article's latest text, which
+may already tell of the price reaction. It spends real money, so run it by hand, as root in
+the coordinator container, first **without** `--yes` to see the window, how many
+articles are stored and a rough cost, then with it:
+
+```
+docker compose exec coordinator python -m coordinator.cli news-replay --since 2026-08-01 --max-usd 20
+docker compose exec coordinator python -m coordinator.cli news-replay --since 2026-08-01 --max-usd 20 --yes
+```
+
+- `--until YYYY-MM-DD` ends the window at the start of that day (UTC); the default is now.
+- It stops before an article that could take the run past `--max-usd`, or the month past
+  `monthly_cap_usd` in `config/ai.toml`, and says which. It does **not** use the live
+  daily news cap; replay calls show in the AI spend as `news_replay`.
+- Run it again to carry on: an article is replayed once, never twice. Three failed
+  analyses in a row (a refused key, an outage) stop it.
 
 ## Future options (not built)
 

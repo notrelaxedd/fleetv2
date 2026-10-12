@@ -27,6 +27,8 @@ from fleet2.models.futures import tries_bucket
 from fleet2.sim import futures_stats, topstep
 from fleet2.sim.cme_session import as_date
 
+SHOWN = 10  # futures models listed at once; "Show all" lists the rest
+
 FEED_TAG = {"databento": "Databento prices", "proxy": "Proxy prices", "synthetic": "Synthetic prices"}
 PAPER_NOTE = ("A futures model first paper trades on Alpaca (SPY or QQQ shares standing in for its contracts). "
               "Only once its checklist is complete can it trade on Topstep.")
@@ -74,6 +76,38 @@ def beats_twin(entry: dict[str, Any], rules: topstep.Rules) -> bool | None:
         return False
     net, twin_net = topstep.net_per_attempt(entry["sim"], rules), topstep.net_per_attempt(entry["twin"], rules)
     return True if net is None or twin_net is None else net > twin_net
+
+
+FLOOR_PASS_RATE = 0.02   # "(nearly) zero" pass rate
+FLOOR_TIMEOUT_SHARE = 0.5  # "mostly ran out of time"
+
+
+def timeout_share(sim: dict[str, Any]) -> float | None:
+    """The share of attempts that ran out of time (neither passed nor hit the loss floor):
+    the simulation's count of given-up attempts, else what pass and fail rates leave over."""
+    attempts, gave_up = sim.get("attempts"), sim.get("gave_up")
+    if attempts and gave_up is not None:
+        return float(gave_up) / float(attempts)
+    if sim.get("pass_rate") is not None and sim.get("fail_rate") is not None:
+        return max(0.0, 1.0 - float(sim["pass_rate"]) - float(sim["fail_rate"]))
+    return None
+
+
+def floor_note(pick: dict[str, Any], rules: topstep.Rules) -> str | None:
+    """Why a model sits on the fee floor, in plain words: it (nearly) never reaches the
+    profit target and its attempts mostly run out of time, so all it does is pay the
+    monthly fee. None for any other model (or when the timeout share is not known)."""
+    sim = pick.get("sim") or {}
+    rate = sim.get("pass_rate")
+    if rate is None or rate > FLOOR_PASS_RATE:
+        return None
+    timeout = timeout_share(sim)
+    if timeout is None or timeout < FLOOR_TIMEOUT_SHARE:
+        return None
+    text = "Never reaches the target: it pays the monthly fee until time runs out."
+    if rules.combine_monthly is not None and sim.get("mean_months") is not None:
+        text += f" The fees alone cost about {dollars(rules.combine_monthly * sim['mean_months'], signed=False)} an attempt."
+    return text
 
 
 def luck(m: dict[str, Any], tries: dict[str, dict[str, float]]) -> dict[str, Any]:
@@ -130,6 +164,7 @@ def list_row(m: dict[str, Any], rules: topstep.Rules) -> dict[str, Any]:
                       + (f" · {per_day_text(daily['value'])} a day of {per_day_text(daily['needed'])} needed"
                          if daily and daily["value"] is not None else "")
                       if st["tested"] else "Not tested yet"),
+        "floor_note": floor_note(pick, rules) if st["tested"] and pick else None,
         "beats": st["beats"], "rankable": rankable, "retired": retired, "stale": st["stale"], "tested": st["tested"],
         "feed_tag": FEED_TAG.get(feed) if feed else None, "proxy": feed in ("proxy", "synthetic"),
         "spark": curve[::step][:SPARK_POINTS] if curve else [],
@@ -262,6 +297,9 @@ def cards(m: dict[str, Any], rules: topstep.Rules, pick: dict[str, Any], tries: 
               f"Counting {lk['trials']:,} setting{'s' if lk['trials'] != 1 else ''} tried",
               "plain" if lk["value"] is None else "gain" if lk["value"] < 0.05 else "warn" if lk["value"] < 0.5 else "loss"),
     ]
+    flag = floor_note(pick, rules)
+    if flag:
+        next(c for c in out if c["key"] == "net")["flag"] = flag
     return out
 
 
@@ -520,10 +558,23 @@ def live_signals(conn: psycopg.Connection, now: datetime) -> list[dict[str, Any]
     return out
 
 
+def shown(rows: list[dict[str, Any]], chosen_id: str | None, show_all: bool) -> list[dict[str, Any]]:
+    """The rows the list shows: all of them with show_all; otherwise the SHOWN most
+    profitable (the ranking's order, retired models left out), plus the selected model
+    at the end when it is not among them, so a link to it still opens it."""
+    if show_all:
+        return rows
+    top = [r for r in rows if not r["retired"]][:SHOWN]
+    if chosen_id and all(r["id"] != chosen_id for r in top):
+        top += [r for r in rows if r["id"] == chosen_id]
+    return top
+
+
 def futures_page(conn: psycopg.Connection, rules: topstep.Rules, selected_id: str | None = None,
                  search: dict[str, Any] | None = None, venues: Any = None,
-                 now: datetime | None = None) -> dict[str, Any]:
-    """The futures list (ranked), the selected model and the prices and search panel."""
+                 now: datetime | None = None, show_all: bool = False) -> dict[str, Any]:
+    """The futures list (ranked; only the SHOWN most profitable unless show_all), the
+    selected model and the prices and search panel."""
     now = now or datetime.now(timezone.utc)
     models = [m for m in list_models(conn, include_retired=True) if m["market"] == "futures"]
     rows = ranked([list_row(m, rules) for m in models])
@@ -531,6 +582,7 @@ def futures_page(conn: psycopg.Connection, rules: topstep.Rules, selected_id: st
     chosen_id = selected_id if selected_id in by_id else (rows[0]["id"] if rows else None)
     for r in rows:
         r["selected"] = r["id"] == chosen_id
+    listed = shown(rows, chosen_id, show_all)
     prices = futures_data.status_line(conn)
     tries = futures_models.tries(conn)
     notice = None
@@ -551,7 +603,10 @@ def futures_page(conn: psycopg.Connection, rules: topstep.Rules, selected_id: st
     return {
         "view": "futures",
         "notice": notice,
-        "models": rows,
+        "models": listed,
+        "show_all": show_all,
+        "more": (f"Showing the {len([r for r in listed if not r['retired']][:SHOWN])} most profitable of "
+                 f"{len(rows)} futures models." if len(listed) < len(rows) else None),
         "selected": selected,
         "prices": prices,
         "fee_note": (f"{topstep.FEE_MESSAGE} ({', '.join(missing)}): futures backtests and model search need it."

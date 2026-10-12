@@ -3,7 +3,7 @@
 <ul class="mlist" data-models-list>
 {% for m in models %}
   <li>
-    <a class="mrow" href="/models?market=futures&amp;id={{ m.id | urlencode }}" data-model="{{ m.id }}" data-rank="{{ m.rank if m.rank else '' }}"{% if m.selected %} data-selected="true" aria-current="true"{% endif %}>
+    <a class="mrow" href="/models?market=futures{% if show_all %}&amp;all=1{% endif %}&amp;id={{ m.id | urlencode }}" data-model="{{ m.id }}" data-rank="{{ m.rank if m.rank else '' }}"{% if m.selected %} data-selected="true" aria-current="true"{% endif %}>
       <span class="mname" data-name>{% if m.rank %}<span class="num muted">{{ m.rank }}.</span> {% endif %}{{ m.name }}</span>
       <span class="mroi num" data-money data-tone="{{ m.tone }}">{{ m.money }}</span>
       <span class="mdesc" data-pass-line>{{ m.pass_line }}</span>
@@ -13,12 +13,15 @@
         <span class="tag" data-tag="status" data-status="{{ m.status_key }}">{{ m.status }}</span>
         {% if m.feed_tag %}<span class="tag{% if m.proxy %} warn{% endif %}" data-tag="feed">{{ m.feed_tag }}</span>{% endif %}
         {% if m.tested and m.beats == false %}<span class="tag warn" data-tag="twin">No better than a coin flip</span>{% endif %}
+        {% if m.floor_note %}<span class="tag warn" data-tag="floor" title="{{ m.floor_note }}">Never reaches the target</span>{% endif %}
         {% if m.stale %}<span class="tag warn" data-tag="stale">Rules changed: backtest again</span>{% endif %}
       </span>
     </a>
   </li>
 {% endfor %}
 </ul>
+{% if more %}<p class="muted" data-more>{{ more }} <a href="/models?market=futures&amp;all=1{% if selected %}&amp;id={{ selected.id | urlencode }}{% endif %}" data-show-all>Show all</a></p>
+{% elif show_all %}<p class="muted" data-more>Showing all futures models. <a href="/models?market=futures{% if selected %}&amp;id={{ selected.id | urlencode }}{% endif %}" data-show-top>Show only the most profitable</a></p>{% endif %}
 {% else %}
 <p class="empty" data-empty="models">No futures models yet.</p>
 {% endif %}

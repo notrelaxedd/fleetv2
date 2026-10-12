@@ -11,16 +11,20 @@ NAME = "Crypto trend"
 MARKET = "crypto"
 DESCRIPTION = "Holds the coins whose prices are trending up and moves to cash when the trend turns down."
 HOW_IT_WORKS = (
-    "For each coin it compares the average price of the last day or so with the average of the last week or two. "
+    "Once a day or less often, it compares each coin's average price over the last few days with its average over "
+    "the last few weeks. "
     "When the short average is above the long one the price is climbing, so it holds that coin. "
     "When the short average drops below the long one, it sells and waits in cash."
 )
 SYMBOLS = CRYPTO
-DEFAULT_PARAMS: dict[str, Any] = {"fast_hours": 24, "slow_hours": 168, "rebalance_every": 4, "max_coins": 8}
+# Decides once a day on averages of days and weeks: every crypto fill costs about 35 bp,
+# and on zero-edge random-walk prices the old intraday settings paid ~$2,300 a year in
+# fees on $10,000, against ~$650 deciding daily on slower averages.
+DEFAULT_PARAMS: dict[str, Any] = {"fast_hours": 48, "slow_hours": 336, "rebalance_every": 24, "max_coins": 8}
 SEARCH_SPACE = {
-    "fast_hours": (6, 72, "int"),
-    "slow_hours": (96, 720, "int"),
-    "rebalance_every": (1, 24, "int"),
+    "fast_hours": (24, 168, "int"),
+    "slow_hours": (168, 1440, "int"),
+    "rebalance_every": (24, 168, "int"),
     "max_coins": (3, 8, "int"),
 }
 
