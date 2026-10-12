@@ -38,7 +38,7 @@ def metrics_with(roi: float, trades: int) -> dict:
 
 @pytest.fixture
 def stored(conn):
-    """momentum +20% (150 trades), dip_buy +5% (150), pairs +50% (12 trades: not enough), crypto_trend untested."""
+    """momentum +20% (150 trades), dip_buy +5% (150), pairs +50% (12 trades: not enough), the crypto models untested."""
     models.store_backtest(conn, "momentum", metrics_with(0.20, 150), None)
     models.store_backtest(conn, "dip_buy", metrics_with(0.05, 150), None)
     models.store_backtest(conn, "pairs", metrics_with(0.50, 12), None)
@@ -52,11 +52,11 @@ def page_ids(html: str) -> list[str]:
 def test_list_is_ranked_with_rank_and_signed_roi(client, stored):
     html = client.get("/models").text
     # enough trades first by ROI, then not enough trades, then not tested
-    assert page_ids(html) == ["momentum", "dip_buy", "pairs", "crypto_trend"]
+    assert page_ids(html) == ["momentum", "dip_buy", "pairs", "crypto_structure", "crypto_trend"]
     assert re.findall(r'data-rank="(\d+)"', html) == ["1", "2"]  # only models with 100+ trades get a rank
     rows = html.split("data-models-list", 1)[1]
     rois = [re.sub(r"\s+", " ", unescape(m)).strip() for m in re.findall(r"<[^>]*data-roi[^>]*>(.*?)</", rows, re.S)]
-    assert rois == ["+20.0%", "+5.0%", "+50.0%", "-"]
+    assert rois == ["+20.0%", "+5.0%", "+50.0%", "-", "-"]
     assert 'data-roi data-tone="gain"' in html
 
 

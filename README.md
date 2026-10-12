@@ -99,8 +99,8 @@ with the lowest CPU), to one worker, or to every idle worker:
 First run, in order:
 
 1. Assign a **Data refresh** and wait for it to finish. Backtests need the prices.
-2. **Run backtest** for each of the four starter models (Momentum, Dip buyer, Crypto
-   trend, Pairs), from the Models screen or Assign a job.
+2. **Run backtest** for each of the five starter models (Momentum, Dip buyer, Crypto
+   trend, Crypto structure, Pairs), from the Models screen or Assign a job.
 3. Open **Models** to compare them.
 
 ![Fleet screen](docs/screenshots/stage5-fleet-desktop.png)
